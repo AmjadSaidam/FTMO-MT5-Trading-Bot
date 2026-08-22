@@ -1,0 +1,14 @@
+# Runtime dependencies for live_trading/live_loop.py only.
+# Install on the Windows VM with: pip install -r requirements.txt
+#
+# MetaTrader5 requires Windows and Python < 3.12 (no macOS/Linux wheels) -
+# see live_trading/mt5_connector.py. Use a 3.11 interpreter on the VM.
+
+pandas==3.0.3
+numpy==2.5.1
+scikit-learn==1.6.1
+MetaTrader5>=5.0.45
+
+# Azure Key Vault secret retrieval (managed identity on the VM)
+azure-identity>=1.19.0
+azure-keyvault-secrets>=4.9.0

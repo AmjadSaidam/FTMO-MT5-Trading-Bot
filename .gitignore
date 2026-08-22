@@ -1,0 +1,9 @@
+# general
+__pycache__/
+__init__/
+.DS_Store/
+.env
+logs/
+
+# claude
+.claude/
