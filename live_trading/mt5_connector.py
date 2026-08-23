@@ -19,7 +19,7 @@ def connect_account():
     mt5.shutdown() # close any stale prior session before reconnecting, no-op if none exists
     env = lambda x: os.environ.get(x)
     conn = mt5.initialize(path = env('META_PATH'),
-                          login = env('META_LOGIN'),
+                          login = int(env('META_LOGIN')),
                           password = env('META_PASSWORD'),
                           server = env('META_SERVER'))
     if not conn:
