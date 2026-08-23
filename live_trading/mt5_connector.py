@@ -53,6 +53,7 @@ def get_latest_bars_dates(symbol: str,
 
     rates_frame = pd.DataFrame(rates)
     rates_frame['time'] = pd.to_datetime(rates_frame['time'], unit = 's')
+    rates_frame.set_index('time', inplace = True)
 
     return rates_frame
 
