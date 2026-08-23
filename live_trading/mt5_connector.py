@@ -26,6 +26,10 @@ def connect_account():
         err_tup = mt5_errors.MT5error()
         raise mt5_errors.MT5ConnectionError(f'connection failed with error code {err_tup[0]}: {err_tup[1]}')
 
+def is_connected() -> bool:
+    """whether the IPC link to the terminal is still alive; None from terminal_info() means it isn't"""
+    return mt5.terminal_info() is not None
+
 def get_latest_bar_time(symbol: str, 
                         timeframe: str = mt5.TIMEFRAME_M5) -> int:
     """open time (epoch seconds) of the most recent bar, cheap 1-bar fetch used to detect a new bar close without pulling the full history window"""

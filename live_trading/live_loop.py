@@ -48,6 +48,14 @@ def add_multi_timeframe_columns(strat: SignalFunc,
 
     return concatenate_timeframe_data(data, [h1_data, h4_data, h8_data]).dropna()
 
+def _reconnect_if_disconnected():
+    """MT5RatesError/PositionError/OrderError can mean a lost terminal connection or a genuine
+    request error; only reconnect when terminal_info() confirms the IPC link is actually down"""
+    if not mt5_conn.is_connected():
+        logging.error('MT5 terminal connection lost, reconnecting')
+        time.sleep(5)
+        mt5_conn.connect_account()
+
 def run_live_loop(symbols_strats: dict[str, SignalFunc],
                   strat_ids: dict[str, int],
                   symbols_strats_kwargs: dict[str, dict] | None = None,
@@ -56,7 +64,13 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                   grid_search_rrs: np.ndarray = np.linspace(1.0, 3.0, 5)):
     """multi-strategy logic"""
     log_cfg.setup_logging() # call once (dont re-initialise)
-    mt5_conn.connect_account()
+    while True:
+        try:
+            mt5_conn.connect_account()
+            break
+        except mt5_err.MT5ConnectionError as e:
+            logging.error(f'{e} \ninitial connection failed, retrying in 5s')
+            time.sleep(5)
     logging.info('connected to MT5 account, starting live loop')
 
     # account defaults 
@@ -256,24 +270,30 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                                               sl = sl, tp = tp, magic = trade_magic_id)
 
         # exceptions
+        # error printed to console 
+        # events logged to notepad using log_event()
         except mt5_err.MT5ConnectionError as e:
-            logging.error(f'{e} \nconnection lost, reconnecting')
+            logging.error(f'{e} \nconnection lost, reconnecting') 
             time.sleep(5)
             mt5_conn.connect_account()
 
-        except mt5_err.MT5RatesError as e: 
-            logging.error(f'{e} \nbatch fetch failed, will retry next poll')
-        
+        except mt5_err.MT5RatesError as e:
+            logging.error(f'{e}: \nbatch fetch failed, will retry next poll')
+            _reconnect_if_disconnected()
+
         except mt5_err.MT5PositionError as e:
-            logging.error(f'{e} \nget positions failed, position with ticket does not exist')
+            logging.error(f'{e}: \nget positions failed, position with ticket does not exist')
+            _reconnect_if_disconnected()
 
         except mt5_err.MT5OrderError as e:
-            logging.error(f'{e} \norder failed, skipping this signal')
+            logging.error(f'{e}: \norder failed, skipping this signal')
             log_cfg.log_event('order_rejected', error = str(e))
+            _reconnect_if_disconnected()
 
-        except Exception:
+        except Exception as e:
+            logging.error(f'{e} :\nun tracked failure')
             logging.exception('unhandled exception in live loop')
-            break
+            _reconnect_if_disconnected()
 
         # poll next request 
         time.sleep(1) # re-run every 1 second
