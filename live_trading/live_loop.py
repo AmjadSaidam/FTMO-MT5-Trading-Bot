@@ -35,7 +35,9 @@ import code.optimisation as opt
 # strategies requiring 1h/4h/8h columns merged onto the base timeframe data, see app/dashboard.py
 MULTI_TIMEFRAME_STRATS = {session_breakout}
 
-def add_multi_timeframe_columns(strat: SignalFunc, data: pd.DataFrame, base_tf: str = '5min') -> pd.DataFrame:
+def add_multi_timeframe_columns(strat: SignalFunc, 
+                                data: pd.DataFrame, 
+                                base_tf: str = '5min') -> pd.DataFrame:
     """builds and merges 1h/4h/8h OHLC columns onto base_tf data for strategies that require them (e.g. session_breakout)"""
     if strat not in MULTI_TIMEFRAME_STRATS:
         return data
@@ -84,6 +86,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
     strategy_skip_trade = {symbol: False for symbol in symbols_strats.keys()}
     strategy_consec_loss = {symbol: 0 for symbol in symbols_strats.keys()}
 
+    # strategy polling
     while True:
         try:
             current_day_time = datetime.today().now()

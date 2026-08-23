@@ -13,13 +13,7 @@ from strategy_indicators import vwap, bollinger_bands, sesssion_cumulative_volum
 def lower_to_higher_timeframe(data: pd.DataFrame, 
                               base_tf: str = '5m', 
                               higher_tf: str | None = None):
-    """
-    upscale data resolution function: takes in a dataframe and combines to higher timeframe \\
-
-    data - pd.DataFrame:  \\
-    base_tf - str: \\
-    higher_tf - higher_tf: 
-    """
+    """upscale data resolution function: takes in a dataframe and combines to higher timeframe"""
     # base variables
     ohlc_dict = {
         'open': 'first', 
@@ -28,16 +22,13 @@ def lower_to_higher_timeframe(data: pd.DataFrame,
         'close': 'last', 
         'volume': 'sum'
     }
-
     # logic
     if base_tf == higher_tf: # base case 
         return data
     
     data = data.resample(higher_tf).agg(ohlc_dict)
-
     # set resmapled timeframe at bar open -> close, then backward in merge_asof(), function gets prior timestamp 
     data.index = data.index + pd.tseries.frequencies.to_offset(higher_tf)
-
     if higher_tf != '5min': 
         data.rename(columns = {k: k + higher_tf for k in ohlc_dict.keys()}, inplace = True)
     return data
