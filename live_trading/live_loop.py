@@ -3,23 +3,48 @@ Live MetaTrader5 trade execution logic
 
 polling function that request and send trade information to MetaTrader5 terminal 
 """
-import os 
+import os
+import sys
 from collections import defaultdict
 import pandas as pd
 import numpy as np
 from datetime import datetime
-import MetaTrader5 as mt5 
-import time 
-import logging 
-# .py 
+import MetaTrader5 as mt5
+import time
+import logging
+from dotenv import load_dotenv
+load_dotenv()
+
+# code/*.py modules cross-import each other by bare module name (eg. "from risk_management import atr"),
+# so both the project root and code/ itself must be on sys.path (mirrors app/dashboard.py)
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for p in (ROOT, os.path.join(ROOT, 'code')):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+# .py
 import mt5_connector as mt5_conn
 import mt5_errors as mt5_err
 import logging_config as log_cfg
-from code.trading_strategies import session_breakout, vwap_breakout, bollinger_band_cdv
+from code.trading_strategies import (session_breakout, vwap_breakout, bollinger_band_cdv,
+                                     lower_to_higher_timeframe, concatenate_timeframe_data)
 from code.backtest_engine import SignalFunc, risk_scaling, position_sizing
 from code.regime_filter import r2, categorise_regime
 from code.risk_management import atr, consecutive_loss_threshold, RandomForestVol
 import code.optimisation as opt
+
+# strategies requiring 1h/4h/8h columns merged onto the base timeframe data, see app/dashboard.py
+MULTI_TIMEFRAME_STRATS = {session_breakout}
+
+def add_multi_timeframe_columns(strat: SignalFunc, data: pd.DataFrame, base_tf: str = '5min') -> pd.DataFrame:
+    """builds and merges 1h/4h/8h OHLC columns onto base_tf data for strategies that require them (e.g. session_breakout)"""
+    if strat not in MULTI_TIMEFRAME_STRATS:
+        return data
+
+    h1_data = lower_to_higher_timeframe(data, base_tf, '1h')
+    h4_data = lower_to_higher_timeframe(data, base_tf, '4h')
+    h8_data = lower_to_higher_timeframe(data, base_tf, '8h')
+
+    return concatenate_timeframe_data(data, [h1_data, h4_data, h8_data]).dropna()
 
 def run_live_loop(symbols_strats: dict[str, SignalFunc],
                   strat_ids: dict[str, int],
@@ -44,7 +69,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
     wfa_in_sample_length = int(os.environ.get('META_WFA_IN_SAMPLE_DAYS'))
     run_wfa = False
     time_last_wfa = None 
-    prior_day = datetime.today().now()
+    prior_day_time = datetime.today().now()
     new_day = False
 
     # wfa 
@@ -52,6 +77,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
     strategy_opt_rr = {}
 
     # ml risk management
+    feature_window = int(os.environ.get('META_ML_FEATURE_WINDOW'))
     strategy_models = {}
 
     # performance
@@ -60,11 +86,11 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
 
     while True:
         try:
-            current_day = datetime.today().now()
+            current_day_time = datetime.today().now()
             # new day 
-            if (current_day - prior_day).days == 1:
+            if (current_day_time - prior_day_time).days == 1:
                 new_day = True
-                prior_day = current_day
+                prior_day_time = current_day_time
             else:
                 new_day = False
 
@@ -74,13 +100,17 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
             if time_last_wfa is None: # on first iteration
                 run_wfa = True
             else:
-                time_diff = (current_day - time_last_wfa).days 
+                time_diff = (current_day_time - time_last_wfa).days 
                 if time_diff > wfa_in_sample_length: 
                     run_wfa = True
             if run_wfa:
                 for symbol, strat in symbols_strats.items():
                     # data, drop the still-forming last bar so training only sees closed bars
-                    wfa_data = mt5_conn.get_latest_bars_dates(symbol).iloc[:-1]
+                    # copy_rates_from anchors on "now" (default date_from) and counts backward,
+                    # so count alone covers the wfa_in_sample_length-day window
+                    wfa_bar_count = wfa_in_sample_length * 24 * 60 // 5
+                    wfa_data = mt5_conn.get_latest_bars_dates(symbol, count = wfa_bar_count).iloc[:-1]
+                    wfa_data = add_multi_timeframe_columns(strat, wfa_data)
                     # run grid search
                     gd_params = opt.grid_search_params(data = wfa_data,
                                                        strat = strat,
@@ -105,7 +135,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                     strategy_opt_rr[symbol] = gd_metadata['opt_rr']
 
                     # update timeframe
-                    time_last_wfa = current_day
+                    time_last_wfa = current_day_time
 
             for symbol, strat in symbols_strats.items():
                 # eod exit
@@ -127,7 +157,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                             log_cfg.log_event('position_closed', symbol = symbol, ticket = ticket[-1],
                                               reason = 'sl_tp_hit', pnl = pnl)
 
-                            del strategy_open_tickets[symbol] # delete all positions, positions returns ()
+                            strategy_open_tickets[symbol] = [] # positions returns (), clear rather than delete the key so future orders can still append
                         else:
                             # trade-live force close
                             mt5_conn.close_position(positions[-1]) # close most recent position
@@ -139,7 +169,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                                 strategy_consec_loss[symbol] += 1
                             log_cfg.log_event('position_closed', symbol = symbol, ticket = ticket[-1],
                                               reason = 'eod_force_close', pnl = pnl)
-                            del strategy_open_tickets[symbol]
+                            strategy_open_tickets[symbol] = []
                         strategy_live_trade[symbol] = False # flat going into the new day, allow re-entry
 
                 live_trade = strategy_live_trade[symbol]
@@ -155,12 +185,15 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                     # pull data. last row is the just-opened, still-forming bar - drop it so
                     # signal/features are evaluated on the last CLOSED bar, matching
                     # backtest_engine.py's timing (signal/features at t-1, entry at open of t)
-                    data = mt5_conn.get_latest_bars_dates(symbol)
+                    # copy_rates_from anchors on "now" and counts backward, so count alone covers
+                    # bars since midnight; floor at feature_window so rolling features aren't all-NaN early in the day
+                    minutes_since_midnight = current_day_time.hour * 60 + current_day_time.minute
+                    bars_elapsed_from_new_day = max(minutes_since_midnight // 5, feature_window + 1)
+                    data = mt5_conn.get_latest_bars_dates(symbol, count = bars_elapsed_from_new_day)
                     tob = data.iloc[-1, :] # forming bar - its open is the entry reference price
                     closed_data = data.iloc[:-1] # drop forming bar (last entry - values at snapshot)
 
                     # ml model features
-                    feature_window = int(os.environ.get('META_ML_FEATURE_WINDOW'))
                     atr_pct = (atr(closed_data) / closed_data.close.to_numpy())[-1].item()
                     regime = categorise_regime(
                         closed_data.close.rolling(feature_window).apply(r2, raw = True)
@@ -184,7 +217,8 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
 
                     if not strategy_skip_trade[symbol]:
                         # generate signal off the last closed bar
-                        signal_series, signal_direction_arr = strat(closed_data, **((symbols_strats_kwargs or {}).get(symbol) or {}))
+                        strat_data = add_multi_timeframe_columns(strat, closed_data)
+                        signal_series, signal_direction_arr = strat(strat_data, **((symbols_strats_kwargs or {}).get(symbol) or {}))
                         signal, signal_direction = signal_series.iloc[-1], signal_direction_arr[-1]
                         if signal:
                             log_cfg.log_event('signal_generated', symbol = symbol, strategy = strat.__name__,
@@ -236,6 +270,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
 
         except Exception:
             logging.exception('unhandled exception in live loop')
+            break
 
         # poll next request 
         time.sleep(1) # re-run every 1 second

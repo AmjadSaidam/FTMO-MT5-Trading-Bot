@@ -26,7 +26,8 @@ def connect_account():
         err_tup = mt5_errors.MT5error()
         raise mt5_errors.MT5ConnectionError(f'connection failed with error code {err_tup[0]}: {err_tup[1]}')
 
-def get_latest_bar_time(symbol: str, timeframe: str = mt5.TIMEFRAME_M5) -> int:
+def get_latest_bar_time(symbol: str, 
+                        timeframe: str = mt5.TIMEFRAME_M5) -> int:
     """open time (epoch seconds) of the most recent bar, cheap 1-bar fetch used to detect a new bar close without pulling the full history window"""
     rates = mt5.copy_rates_from(symbol, timeframe, datetime.today(), 1)
     if rates is None:
