@@ -76,9 +76,11 @@ def add_session_flags(data: pd.DataFrame,
     data[ex_one] = (session_one_hour >= session_one[0]) & (session_one_hour < session_one[1]) # pandas type based indexing using (&, |)
     data[ex_two] = (session_two_hour >= session_two[0]) & (session_two_hour < session_two[1])
 
-    # convert index to local clock time 
-    if str(data.index.tz) != trading_time_zone:
-        data.set_index(data.index.tz_convert(trading_time_zone), inplace = True) 
+    # convert index to local clock time
+    if str(utc_index.tz) != trading_time_zone:
+        data.set_index(utc_index.tz_convert(trading_time_zone), inplace = True)
+    else:
+        data.set_index(utc_index, inplace = True)
 
     return data
 
