@@ -1,6 +1,7 @@
 """
 """
 # general imports 
+import os
 import pandas as pd
 import numpy as np 
 from sklearn.ensemble import RandomForestClassifier
@@ -57,6 +58,7 @@ def backtest_strategy(data: pd.DataFrame,
                       commission_pct: float = 0.00004, 
                       standard_lot: float = 1e5, 
                       dollar_commission_lot: float = 5.0, 
+                      minimum_volume_lots: float = 0.01, 
                       trading_time_zone: str = 'Europe/London') -> dict:
     """
     signal agnostic (signal as input not calculated in logic) atr backtest boilerplate function. 
@@ -86,6 +88,7 @@ def backtest_strategy(data: pd.DataFrame,
 
     # default data arrays 
     position = np.zeros(n, dtype = int) # $ traded
+    volume_lots = np.zeros(n, dtype = float)
     adjusted_returns = np.zeros(n, dtype = float) # adjusted_returns =  returns - transaction costs
     trade_rr = np.zeros(n, dtype = float) # trade risk_reward
     equity = np.full(n, account_balance, dtype = float) # rolling equity
@@ -234,57 +237,70 @@ def backtest_strategy(data: pd.DataFrame,
                     spread_pct = spread_dollar / df.close
                     
                     # fixed fees for crypto/indicies/commodities and fx
+                    trade_volume_lots = trade_value / df.open
                     if forex:
-                        entry_cost = (slippage_pct + spread_pct) + (trade_value / df.open / standard_lot * dollar_commission_lot / equity[t]) * 2  # position size / standard lot * 5, already $/equity so no leverage scaling
+                        trade_volume_lots /= standard_lot
+                        entry_cost = (slippage_pct + spread_pct) + (trade_volume_lots * dollar_commission_lot / equity[t]) * 2  # position size / standard lot * 5 (fraction of dollar commission per lot), already $equity so no leverage scaling 
                     else:
                         entry_cost = (slippage_pct + spread_pct + commission_pct) * 2 * leverage # *2 for round trip cosst
 
-                    # --- immediately resolved trades --- 
-                    # does current bar hit trade
-                    # high/low range can still breach the stop or target before the next bar is seen)
-                    if trade_direction == 1:
-                        entry_hit_stop = df.low <= stop_price
-                        entry_hit_target = df.high > target_price
-                    else:
-                        entry_hit_stop = df.high >= stop_price
-                        entry_hit_target = df.low < target_price
+                    # check volume is within tradable limits
+                    max_trade_volume_lots = account_balance / df.open
+                    if forex:
+                        max_trade_volume_lots /= standard_lot # match trade_volume_lots' lot-denominated units
+                    valid_trade_volume_lots = minimum_volume_lots <= trade_volume_lots <= max_trade_volume_lots * (100 if forex else 3.33) # enforce max leverage constraint
 
-                    if entry_hit_stop:
-                        exit_price = stop_price
-                        consec_loss += 1
-                        if consecutive_loss_before_skip is not None and consecutive_loss_threshold(consec_loss, consecutive_loss_before_skip):
-                            consec_loss = 0 # after skip reset counter
-                            skip_next_day = True
-                        label_trd_w[t] = 0 # ml label: lossing trade
-                    elif entry_hit_target:
-                        exit_price = target_price
-                        consec_loss = 0
-                        label_trd_w[t] = 1 # ml label: winning trade
-                    else:
-                        exit_price = None
+                    if valid_trade_volume_lots:
+                        # --- immediately resolved trades --- 
+                        # does current bar hit trade
+                        # high/low range can still breach the stop or target before the next bar is seen)
+                        if trade_direction == 1:
+                            entry_hit_stop = df.low <= stop_price
+                            entry_hit_target = df.high > target_price
+                        else:
+                            entry_hit_stop = df.high >= stop_price
+                            entry_hit_target = df.low < target_price
 
-                    # --- logs ---
-                    # update default arrays
-                    price_for_return = exit_price if (exit_price is not None) else df.close
-                    adjusted_returns[t] = leverage * trade_direction * (price_for_return - entry_price)/entry_price - entry_cost # rt = leverage*trade_direction*return - leverage*cost (cost only on entry)
-                    winning_trades += 1 if (exit_price is not None and trade_direction * (exit_price - entry_price) > 0) else 0
-                    position[t] = trade_direction
-                    equity[t] = account_equity(equity[t-1], adjusted_returns[t])
-                    trade_rr[t] = trade_direction * (exit_price - entry_price) / stop_distance if (exit_price is not None) else 0
+                        if entry_hit_stop:
+                            exit_price = stop_price
+                            consec_loss += 1
+                            if consecutive_loss_before_skip is not None and consecutive_loss_threshold(consec_loss, consecutive_loss_before_skip):
+                                consec_loss = 0 # after skip reset counter
+                                skip_next_day = True
+                            label_trd_w[t] = 0 # ml label: lossing trade
+                        elif entry_hit_target:
+                            exit_price = target_price
+                            consec_loss = 0
+                            label_trd_w[t] = 1 # ml label: winning trade
+                        else:
+                            exit_price = None
 
-                    # update default vars
-                    entry_day = day[t]
-                    in_trade = exit_price is None
+                        # --- logs ---
+                        # update default arrays
+                        price_for_return = exit_price if (exit_price is not None) else df.close
+                        adjusted_returns[t] = leverage * trade_direction * (price_for_return - entry_price)/entry_price - entry_cost # rt = leverage*trade_direction*return - leverage*cost (cost only on entry)
+                        winning_trades += 1 if (exit_price is not None and trade_direction * (exit_price - entry_price) > 0) else 0
+                        position[t] = trade_direction
+                        volume_lots[t] = trade_volume_lots
+                        equity[t] = account_equity(equity[t-1], adjusted_returns[t])
+                        trade_rr[t] = trade_direction * (exit_price - entry_price) / stop_distance if (exit_price is not None) else 0
 
-                    trade_time = t
-                    tot_trades += 1
+                        # update default vars
+                        entry_day = day[t]
+                        in_trade = exit_price is None
 
-                    # ensure limit of one trade per day
-                    traded_today = True
+                        trade_time = t
+                        tot_trades += 1
+
+                        # ensure limit of one trade per day
+                        traded_today = True
+                    else: 
+                        traded_today = True
         
     # append default var arrays to dataframe
     data = data.assign(
         position = position, 
+        volume_lots = volume_lots, 
         adjusted_returns = adjusted_returns, 
         equity = equity, 
         trade_rr = trade_rr,
