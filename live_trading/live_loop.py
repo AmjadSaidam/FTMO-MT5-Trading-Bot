@@ -76,10 +76,10 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
     # account defaults 
     initial_account_balance = os.environ.get('META_INITIAL_ACCOUNT_BALANCE')
     initial_strategy_allocation = np.array(strat_weights) * float(initial_account_balance)
-    strategy_equity_dict = {symbol: initial_strategy_allocation[strat_no] for strat_no, symbol in enumerate(symbols_strats.keys())}
-    strategy_live_trade = {symbol: False for symbol in symbols_strats.keys()}
-    strategy_open_tickets = {symbol: [] for symbol in symbols_strats.keys()}
-    strategy_last_bar_time = {symbol: None for symbol in symbols_strats.keys()}
+    strategy_equity_dict = {symbol: initial_strategy_allocation[strat_no] for strat_no, symbol in enumerate(symbols_strats.keys())} # initial strategy allocation in $
+    strategy_live_trade = {symbol: False for symbol in symbols_strats.keys()} # track signal per symbol (max 1 order per symbol per day )
+    strategy_open_tickets = {symbol: [] for symbol in symbols_strats.keys()} # order history
+    strategy_last_bar_time = {symbol: None for symbol in symbols_strats.keys()} # track most recent bar (only request data and run strategy logic once per new bar)
 
     # schedule times
     wfa_in_sample_length = int(os.environ.get('META_WFA_IN_SAMPLE_DAYS'))
@@ -173,7 +173,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                                 strategy_consec_loss[symbol] += 1
                             log_cfg.log_event('position_closed', symbol = symbol, ticket = ticket[-1],
                                               reason = 'sl_tp_hit', pnl = pnl)
-
+                            # symbol orders history to 0
                             strategy_open_tickets[symbol] = [] # positions returns (), clear rather than delete the key so future orders can still append
                         else:
                             # trade-live force close
@@ -186,7 +186,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                                 strategy_consec_loss[symbol] += 1
                             log_cfg.log_event('position_closed', symbol = symbol, ticket = ticket[-1],
                                               reason = 'eod_force_close', pnl = pnl)
-                            strategy_open_tickets[symbol] = []
+                            strategy_open_tickets[symbol] = [] 
                         strategy_live_trade[symbol] = False # flat going into the new day, allow re-entry
 
                 live_trade = strategy_live_trade[symbol]
@@ -196,7 +196,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                     # skip until a new bar has closed, avoids re-fetching/re-evaluating every 1s poll
                     latest_bar_time = mt5_conn.get_latest_bar_time(symbol)
                     if latest_bar_time == strategy_last_bar_time[symbol]:
-                        continue
+                        continue # will not run subsequent code 
                     strategy_last_bar_time[symbol] = latest_bar_time
 
                     # pull data. last row is the just-opened, still-forming bar - drop it so
@@ -238,6 +238,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                         signal_series, signal_direction_arr = strat(strat_data, **((symbols_strats_kwargs or {}).get(symbol) or {}))
                         signal, signal_direction = signal_series.iloc[-1], signal_direction_arr[-1]
                         if signal:
+                            # signal log 
                             log_cfg.log_event('signal_generated', symbol = symbol, strategy = strat.__name__,
                                               direction = int(signal_direction), valid_trade = bool(valid_trade))
                         if signal and valid_trade:
@@ -265,6 +266,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                             strategy_live_trade[symbol] = True
                             # symbol order id
                             strategy_open_tickets[symbol].append(order.order)
+                            # order sent/executed log
                             log_cfg.log_event('order_sent', symbol = symbol, strategy = strat.__name__,
                                               ticket = order.order, type = type, volume = volume,
                                               sl = sl, tp = tp, magic = trade_magic_id)
@@ -296,7 +298,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
             _reconnect_if_disconnected()
 
         # poll next request 
-        time.sleep(1) # re-run every 1 second
+        time.sleep(1) # re-run logic every 1 second
 
 if __name__ == '__main__':
     symbols_strats = {
