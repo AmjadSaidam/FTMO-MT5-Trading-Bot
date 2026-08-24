@@ -73,8 +73,14 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
             time.sleep(5)
     logging.info('connected to MT5 account, starting live loop')
 
-    # account defaults 
+    # env defaults
+    frac_risked = float(os.environ.get('META_TOTAL_RISK_ALLOCATION'))
+    min_vol_lots = float(os.environ.get('META_MIN_VOLUME'))
+    max_fx_lev = float(os.environ.get('META_MAX_FOREX_LEVERAGE'))
+    max_other_lev = float(os.environ.get('META_MAX_OTHER_LEVERAGE'))
     initial_account_balance = os.environ.get('META_INITIAL_ACCOUNT_BALANCE')
+
+    # account default arrays
     initial_strategy_allocation = np.array(strat_weights) * float(initial_account_balance)
     strategy_equity_dict = {symbol: initial_strategy_allocation[strat_no] for strat_no, symbol in enumerate(symbols_strats.keys())} # initial strategy allocation in $
     strategy_live_trade = {symbol: False for symbol in symbols_strats.keys()} # track signal per symbol (max 1 order per symbol per day )
@@ -122,6 +128,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                     run_wfa = True
             if run_wfa:
                 for symbol, strat in symbols_strats.items():
+                    
                     # data, drop the still-forming last bar so training only sees closed bars
                     # copy_rates_from anchors on "now" (default date_from) and counts backward,
                     # so count alone covers the wfa_in_sample_length-day window
@@ -254,22 +261,30 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                             account_balance = sum(strategy_equity_dict.values()) # assumes all position closed (100% free margin)
                             strat_account_balance = strategy_equity_dict.get(symbol)
                             strat_weight = strat_account_balance / account_balance
-                            fraction_risk = float(os.environ.get('META_TOTAL_RISK_ALLOCATION')) # per strategy
+                            fraction_risk = strat_weight * frac_risked # per strategy
                             # volume
                             trade_value = position_sizing(tob.open, sl_dist, account_balance, fraction_risk)[0] # position notional in account currency
+                            volume = trade_value / tob.open
+                            max_volume_lots = account_balance / tob.open
                             if mt5.symbol_info(symbol).currency_base is not None:
-                                volume = trade_value / tob.open / 1e5 # units of base currency -> standard forex lots
+                                volume /= 1e5 # units of base currency -> standard forex lots
+                                max_volume_lots = max_volume_lots / 1e5 * max_fx_lev
                             else:
-                                volume = trade_value / tob.open
-                            # order to MT5
-                            order = mt5_conn.send_order(trade_magic_id, symbol, volume, sl, tp, type = type)
-                            strategy_live_trade[symbol] = True
-                            # symbol order id
-                            strategy_open_tickets[symbol].append(order.order)
-                            # order sent/executed log
-                            log_cfg.log_event('order_sent', symbol = symbol, strategy = strat.__name__,
-                                              ticket = order.order, type = type, volume = volume,
-                                              sl = sl, tp = tp, magic = trade_magic_id)
+                                max_volume_lots *= max_other_lev
+                            if min_vol_lots <= volume < max_volume_lots:
+                                # order to MT5
+                                order = mt5_conn.send_order(trade_magic_id, symbol, volume, sl, tp, type = type)
+                                strategy_live_trade[symbol] = True
+                                # symbol order id
+                                strategy_open_tickets[symbol].append(order.order)
+                                # order sent/executed log
+                                log_cfg.log_event('order_sent', symbol = symbol, strategy = strat.__name__,
+                                                ticket = order.order, type = type, volume = volume,
+                                                sl = sl, tp = tp, magic = trade_magic_id)
+                            else:
+                                log_cfg.log_event('order_rejected', symbol = symbol, strategy = strat.__name__,
+                                                  reason = 'invalid position size', volume = volume,
+                                                  min_volume = min_vol_lots, max_volume = max_volume_lots)
 
         # exceptions
         # error printed to console 
