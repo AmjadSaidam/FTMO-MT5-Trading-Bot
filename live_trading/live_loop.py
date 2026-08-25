@@ -271,6 +271,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                                 max_volume_lots = max_volume_lots / 1e5 * max_fx_lev
                             else:
                                 max_volume_lots *= max_other_lev
+                                # validate position size
                             if min_vol_lots <= volume < max_volume_lots:
                                 # order to MT5
                                 order = mt5_conn.send_order(trade_magic_id, symbol, volume, sl, tp, type = type)
@@ -280,15 +281,18 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                                 # order sent/executed log
                                 log_cfg.log_event('order_sent', symbol = symbol, strategy = strat.__name__,
                                                 ticket = order.order, type = type, volume = volume,
+                                                opt_atr = strategy_opt_atr[symbol], opt_rr = strategy_opt_rr[symbol],
                                                 sl = sl, tp = tp, magic = trade_magic_id)
                             else:
                                 log_cfg.log_event('order_rejected', symbol = symbol, strategy = strat.__name__,
                                                   reason = 'invalid position size', volume = volume,
+                                                  opt_atr = strategy_opt_atr[symbol], opt_rr = strategy_opt_rr[symbol],
                                                   min_volume = min_vol_lots, max_volume = max_volume_lots)
 
         # exceptions
         # error printed to console 
         # events logged to notepad using log_event()
+        # IPC link may still hold despite execption being raised 
         except mt5_err.MT5ConnectionError as e:
             logging.error(f'{e} \nconnection lost, reconnecting') 
             time.sleep(5)
