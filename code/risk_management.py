@@ -83,8 +83,10 @@ class RandomForestVol():
         """optimise model and validate on eval data"""
         return
     
-    def model_predict(self, 
-                      features: dict[str, np.ndarray]): 
+    def model_predict(self,
+                      features: dict[str, np.ndarray]):
         """predict using trained model"""
-        point_feature_pred = pd.DataFrame(features, columns = self.feature_names) # to ensure features have identical names to trained feature set 
+        if self.model is None: # train_model() no-ops when there's not enough labeled in-sample data to fit
+            return False
+        point_feature_pred = pd.DataFrame(features, columns = self.feature_names) # to ensure features have identical names to trained feature set
         return self.model.predict(point_feature_pred)

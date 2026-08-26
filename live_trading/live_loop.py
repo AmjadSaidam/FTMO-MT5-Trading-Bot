@@ -152,6 +152,8 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                     ml_features_in_sample = gd_opt_frame.loc[:, ['atr_pct', 'regime', 'breakout_conv', 'rel_volume']]
                     ensemble = RandomForestVol(ml_features_in_sample, gd_opt_frame['ml_label'], 'regime')
                     ensemble.train_model(train_split = 1) # trained model appended to class attribute
+                    if ensemble.model is None:
+                        logging.warning(f'{symbol}: not enough labelled in-sample trades to train model, trading skipped until next WFA cycle')
 
                     # optimal values 
                     strategy_models[symbol] = ensemble
