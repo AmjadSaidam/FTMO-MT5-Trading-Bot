@@ -54,7 +54,7 @@ def _reconnect_if_disconnected():
     if not mt5_conn.is_connected():
         logging.error('MT5 terminal connection lost, reconnecting')
         time.sleep(5)
-        mt5_conn.connect_account()
+        mt5_conn.connect_account() # will not print connection validation
 
 def run_live_loop(symbols_strats: dict[str, SignalFunc],
                   strat_ids: dict[str, int],
@@ -172,16 +172,19 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                         positions = mt5_conn.get_positions(ticket = ticket[-1])
                         # sl/tp hit
                         if not positions:
-                            # check trade outcome
+                            # check consec loss 
                             pnl = mt5_conn.get_deal_profit(ticket[-1])
                             if pnl > 0:
                                 strategy_consec_loss[symbol] = 0
                             else:
                                 strategy_consec_loss[symbol] += 1
+                            # update strat equity 
+                            strategy_equity_dict[symbol] += pnl
+                            # reset order history
+                            strategy_open_tickets[symbol] = [] # positions returns (), clear rather than delete the key so future orders can still append
+                            # log 
                             log_cfg.log_event('position_closed', symbol = symbol, ticket = ticket[-1],
                                               reason = 'sl_tp_hit', pnl = pnl)
-                            # symbol orders history to 0
-                            strategy_open_tickets[symbol] = [] # positions returns (), clear rather than delete the key so future orders can still append
                         else:
                             # trade-live force close
                             mt5_conn.close_position(positions[-1]) # close most recent position
@@ -191,9 +194,13 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                                 strategy_consec_loss[symbol] = 0
                             else:
                                 strategy_consec_loss[symbol] += 1
+                            # update strat equity 
+                            strategy_equity_dict[symbol] += pnl
+                            # reset order history
+                            strategy_open_tickets[symbol] = [] 
+                            # log
                             log_cfg.log_event('position_closed', symbol = symbol, ticket = ticket[-1],
                                               reason = 'eod_force_close', pnl = pnl)
-                            strategy_open_tickets[symbol] = [] 
                         strategy_live_trade[symbol] = False # flat going into the new day, allow re-entry
 
                 live_trade = strategy_live_trade[symbol]
@@ -277,7 +284,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                                 order = mt5_conn.send_order(trade_magic_id, symbol, volume, sl, tp, type = type)
                                 strategy_live_trade[symbol] = True
                                 # symbol order id
-                                strategy_open_tickets[symbol].append(order.order)
+                                strategy_open_tickets[symbol].append(order.order) # ticket is named tuple field
                                 # order sent/executed log
                                 log_cfg.log_event('order_sent', symbol = symbol, strategy = strat.__name__,
                                                 ticket = order.order, type = type, volume = volume,
