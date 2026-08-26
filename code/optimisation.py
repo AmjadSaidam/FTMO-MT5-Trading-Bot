@@ -9,7 +9,9 @@ def grid_search_params(data: pd.DataFrame,
                        strat_kwargs: dict, 
                        account_balance: float, 
                        atr_multilpiers: list[float], 
-                       risk_rewards: list[float]):
+                       risk_rewards: list[float], 
+                       fraction_risked: float = 0.01,
+                       consec_loss_guard: int = 2):
     """
     """
     inputs = []
@@ -19,11 +21,12 @@ def grid_search_params(data: pd.DataFrame,
                 {
                     'data': data, 
                     'account_balance': account_balance,
+                    'risk_per_trade': fraction_risked,
                     'signal_fc': strat,
                     'signal_kwargs': strat_kwargs, 
                     'atr_multiplier': atr_m, 
                     'risk_reward': rr, 
-                    'consecutive_loss_before_skip': 3, 
+                    'consecutive_loss_before_skip': consec_loss_guard, 
                 }
             )
     
