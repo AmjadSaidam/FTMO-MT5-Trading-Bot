@@ -1,14 +1,15 @@
 """
 Live MetaTrader5 trade execution logic 
 
-polling function that request and send trade information to MetaTrader5 terminal 
+polling function that request and send trade information to MetaTrader5 terminal
 """
 import os
 import sys
+import json
 from collections import defaultdict
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import MetaTrader5 as mt5
 import time
 import logging
@@ -32,6 +33,34 @@ from code.regime_filter import r2, categorise_regime
 from code.risk_management import atr, consecutive_loss_threshold, RandomForestVol
 import code.optimisation as opt
 
+# --- VARIABLE BOOKKEEPING ---
+def _load_state() -> dict | None:
+    """restores strategy equity/order bookkeeping saved by a previous run, if any"""
+    if not os.path.exists(STATE_PATH):
+        return None
+    with open(STATE_PATH) as f:
+        return json.load(f)
+
+def _save_state(state: dict):
+    """write-then-rename so a crash mid-write can't leave a corrupt/partial state file"""
+    os.makedirs(os.path.dirname(STATE_PATH), exist_ok = True)
+    tmp_path = STATE_PATH + '.tmp'
+    with open(tmp_path, 'w') as f: # write file
+        json.dump(state, f, default = float) # casts numpy floats (equity values) to plain float
+    os.replace(tmp_path, STATE_PATH)
+
+# --- CONNECTION LOGIC ---
+def _reconnect_if_disconnected():
+    """MT5RatesError/PositionError/OrderError can mean a lost terminal connection or a genuine
+    request error; only reconnect when terminal_info() confirms the IPC link is actually down"""
+    if not mt5_conn.is_connected():
+        logging.error('MT5 terminal connection lost, reconnecting')
+        time.sleep(5)
+        mt5_conn.connect_account() # will not print connection validation
+
+STATE_PATH = os.path.join(ROOT, 'logs', 'live_state.json')
+
+# --- MULTITIMEFRAME ---
 # strategies requiring 1h/4h/8h columns merged onto the base timeframe data, see app/dashboard.py
 MULTI_TIMEFRAME_STRATS = {session_breakout}
 
@@ -47,14 +76,6 @@ def add_multi_timeframe_columns(strat: SignalFunc,
     h8_data = lower_to_higher_timeframe(data, base_tf, '8h')
 
     return concatenate_timeframe_data(data, [h1_data, h4_data, h8_data]).dropna()
-
-def _reconnect_if_disconnected():
-    """MT5RatesError/PositionError/OrderError can mean a lost terminal connection or a genuine
-    request error; only reconnect when terminal_info() confirms the IPC link is actually down"""
-    if not mt5_conn.is_connected():
-        logging.error('MT5 terminal connection lost, reconnecting')
-        time.sleep(5)
-        mt5_conn.connect_account() # will not print connection validation
 
 def run_live_loop(symbols_strats: dict[str, SignalFunc],
                   strat_ids: dict[str, int],
@@ -106,6 +127,44 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
     strategy_skip_trade = {symbol: False for symbol in symbols_strats.keys()}
     strategy_consec_loss = {symbol: 0 for symbol in symbols_strats.keys()}
 
+    # restore equity/order bookkeeping from a previous run (crash/restart safe)
+    saved_state = _load_state()
+    if saved_state is not None:
+        strategy_equity_dict.update(saved_state['strategy_equity_dict'])
+        strategy_open_tickets.update(saved_state['strategy_open_tickets'])
+        strategy_live_trade.update(saved_state['strategy_live_trade'])
+        strategy_consec_loss.update(saved_state['strategy_consec_loss'])
+        strategy_skip_trade.update(saved_state['strategy_skip_trade'])
+        if saved_state.get('time_last_wfa') is not None:
+            time_last_wfa = datetime.fromisoformat(saved_state['time_last_wfa']) # keeps IS/OOS window boundaries stable across a restart
+        logging.info('restored strategy equity/order and wfa time state from previous run')
+
+        # a restored ticket may have already closed (SL/TP) while this process was down
+        for symbol, tickets in strategy_open_tickets.items():
+            if not tickets:
+                continue
+            if not mt5_conn.get_positions(ticket = tickets[-1]):
+                pnl = mt5_conn.get_deal_profit(tickets[-1])
+                strategy_consec_loss[symbol] = 0 if pnl > 0 else strategy_consec_loss[symbol] + 1
+                strategy_equity_dict[symbol] += pnl
+                strategy_open_tickets[symbol] = []
+                strategy_live_trade[symbol] = False
+                log_cfg.log_event('position_closed', symbol = symbol, ticket = tickets[-1],
+                                  reason = 'reconciled_on_restart', pnl = pnl)
+
+    def _persist():
+        _save_state({
+            'strategy_equity_dict': strategy_equity_dict,
+            'strategy_open_tickets': strategy_open_tickets,
+            'strategy_live_trade': strategy_live_trade,
+            'strategy_consec_loss': strategy_consec_loss,
+            'strategy_skip_trade': strategy_skip_trade,
+            'time_last_wfa': time_last_wfa.isoformat() if (time_last_wfa is not None) else None,
+        })
+
+    if saved_state is not None:
+        _persist() # flush reconciliation immediately
+
     # strategy polling
     while True:
         try:
@@ -130,10 +189,11 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                 for symbol, strat in symbols_strats.items():
                     
                     # data, drop the still-forming last bar so training only sees closed bars
-                    # copy_rates_from anchors on "now" (default date_from) and counts backward,
-                    # so count alone covers the wfa_in_sample_length-day window
-                    wfa_bar_count = wfa_in_sample_length * 24 * 60 // 5
-                    wfa_data = mt5_conn.get_latest_bars_dates(symbol, count = wfa_bar_count).iloc[:-1]
+                    # date-range fetch (not a bar count) so the window is exactly wfa_in_sample_length
+                    # calendar days regardless of the symbol's trading session length (24/7 crypto vs FX vs equity hours)
+                    wfa_data = mt5_conn.get_bars_range(symbol,
+                                                       date_from = current_day_time - timedelta(days = wfa_in_sample_length),
+                                                       date_to = current_day_time).iloc[:-1]
                     wfa_data = add_multi_timeframe_columns(strat, wfa_data)
                     # run grid search
                     gd_params = opt.grid_search_params(data = wfa_data,
@@ -162,6 +222,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
 
                     # update timeframe
                     time_last_wfa = current_day_time
+                _persist()
 
             for symbol, strat in symbols_strats.items():
                 # eod exit
@@ -204,6 +265,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                             log_cfg.log_event('position_closed', symbol = symbol, ticket = ticket[-1],
                                               reason = 'eod_force_close', pnl = pnl)
                         strategy_live_trade[symbol] = False # flat going into the new day, allow re-entry
+                    _persist()
 
                 live_trade = strategy_live_trade[symbol]
 
@@ -217,12 +279,12 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
 
                     # pull data. last row is the just-opened, still-forming bar - drop it so
                     # signal/features are evaluated on the last CLOSED bar, matching
-                    # backtest_engine.py's timing (signal/features at t-1, entry at open of t)
-                    # copy_rates_from anchors on "now" and counts backward, so count alone covers
-                    # bars since midnight; floor at feature_window so rolling features aren't all-NaN early in the day
-                    minutes_since_midnight = current_day_time.hour * 60 + current_day_time.minute
-                    bars_elapsed_from_new_day = max(minutes_since_midnight // 5, feature_window + 1)
-                    data = mt5_conn.get_latest_bars_dates(symbol, count = bars_elapsed_from_new_day)
+                    # backtest_engine.py's timing (signal/features at t-1, entry at open of t)w + 1)
+                    current_day_time = pd.to_datetime(current_day_time, unit = 's')
+                    data = mt5_conn.get_bars_range(symbol, 
+                                                   date_from = current_day_time, 
+                                                   date_to = current_day_time.normalize())
+                    
                     tob = data.iloc[-1, :] # forming bar - its open is the entry reference price
                     closed_data = data.iloc[:-1] # drop forming bar (last entry - values at snapshot)
 
@@ -241,9 +303,10 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                     }
                     # guard by validating signal
                     ensemble: RandomForestVol = strategy_models[symbol]
-                    valid_trade = ensemble.model_predict(point_features)
+                    valid_trade = ensemble.model_predict(point_features) # returns False - trade skipped 
                     if consecutive_loss_threshold(strategy_consec_loss[symbol], int(os.environ.get('META_ML_CONSEC_LOSS_BEFORE_TRADE_SKIP'))):
                         strategy_skip_trade[symbol] = True
+                        _persist()
 
                     # asset vol
                     symbol_atr = atr(closed_data)[-1].item()
@@ -280,8 +343,8 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                                 max_volume_lots = max_volume_lots / 1e5 * max_fx_lev
                             else:
                                 max_volume_lots *= max_other_lev
-                                # validate position size
-                            if min_vol_lots <= volume < max_volume_lots:
+                            # validate position size
+                            if min_vol_lots <= volume <= max_volume_lots:
                                 # order to MT5
                                 order = mt5_conn.send_order(trade_magic_id, symbol, volume, sl, tp, type = type)
                                 strategy_live_trade[symbol] = True
@@ -292,6 +355,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                                                 ticket = order.order, type = type, volume = volume,
                                                 opt_atr = strategy_opt_atr[symbol], opt_rr = strategy_opt_rr[symbol],
                                                 sl = sl, tp = tp, magic = trade_magic_id)
+                                _persist()
                             else:
                                 log_cfg.log_event('order_rejected', symbol = symbol, strategy = strat.__name__,
                                                   reason = 'invalid position size', volume = volume,
