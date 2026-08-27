@@ -367,25 +367,26 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
         # events logged to notepad using log_event()
         # IPC link may still hold despite execption being raised 
         except mt5_err.MT5ConnectionError as e:
-            logging.error(f'{e} \nconnection lost, reconnecting') 
+            logging.error(f'{e}: connection lost, reconnecting') 
             time.sleep(5)
             mt5_conn.connect_account()
 
+        # raised by data pulling functions
         except mt5_err.MT5RatesError as e:
-            logging.error(f'{e}: \nbatch fetch failed, will retry next poll')
+            logging.error(f'{e}: batch fetch failed, will retry next poll')
             _reconnect_if_disconnected()
 
         except mt5_err.MT5PositionError as e:
-            logging.error(f'{e}: \nget positions failed, position with ticket does not exist')
+            logging.error(f'{e}: get positions failed, position with ticket does not exist')
             _reconnect_if_disconnected()
 
         except mt5_err.MT5OrderError as e:
-            logging.error(f'{e}: \norder failed, skipping this signal')
+            logging.error(f'{e}: order failed, skipping this signal')
             log_cfg.log_event('order_rejected', error = str(e))
             _reconnect_if_disconnected()
 
         except Exception as e:
-            logging.error(f'{e} :\nun tracked failure')
+            logging.error(f'{e}: un tracked failure')
             logging.exception('unhandled exception in live loop')
             _reconnect_if_disconnected()
 
