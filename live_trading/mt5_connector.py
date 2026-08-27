@@ -40,6 +40,14 @@ def get_latest_bar_time(symbol: str,
 
     return rates[-1]['time']
 
+def _rates_to_frame(rates) -> pd.DataFrame:
+    rates_frame = pd.DataFrame(rates)
+    rates_frame['time'] = pd.to_datetime(rates_frame['time'], unit = 's')
+    rates_frame.set_index('time', inplace = True)
+    # MT5 returns tick_volume/real_volume, not volume; strategy/feature code downstream expects 'volume'
+    rates_frame.rename(columns = {'tick_volume': 'volume'}, inplace = True)
+    return rates_frame
+
 def get_latest_bars_dates(symbol: str,
                           timeframe: str = mt5.TIMEFRAME_M5,
                           date_from: pd.Timestamp | None = None,
@@ -56,13 +64,20 @@ def get_latest_bars_dates(symbol: str,
         err_tup = mt5_errors.MT5error()
         raise mt5_errors.MT5RatesError(f'failed to request data with error code {err_tup[0]}: {err_tup[1]}')
 
-    rates_frame = pd.DataFrame(rates)
-    rates_frame['time'] = pd.to_datetime(rates_frame['time'], unit = 's')
-    rates_frame.set_index('time', inplace = True)
-    # MT5 returns tick_volume/real_volume, not volume; strategy/feature code downstream expects 'volume'
-    rates_frame.rename(columns = {'tick_volume': 'volume'}, inplace = True)
+    return _rates_to_frame(rates)
 
-    return rates_frame
+def get_bars_range(symbol: str,
+                   date_from,
+                   date_to,
+                   timeframe: str = mt5.TIMEFRAME_M5):
+    """gets symbol bars over a calendar date range; bar count varies with the symbol's trading session length
+    (24/7 crypto vs ~24/5 FX vs equity market hours), unlike a fixed bar-count request"""
+    rates = mt5.copy_rates_range(symbol, timeframe, date_from, date_to)
+    if rates is None:
+        err_tup = mt5_errors.MT5error()
+        raise mt5_errors.MT5RatesError(f'failed to request data with error code {err_tup[0]}: {err_tup[1]}')
+
+    return _rates_to_frame(rates)
 
 def send_order(trade_magic_id: int,
                symbol: str, 
