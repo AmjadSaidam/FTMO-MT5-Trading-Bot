@@ -127,6 +127,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
     strategy_skip_trade = {symbol: False for symbol in symbols_strats.keys()}
     strategy_consec_loss = {symbol: 0 for symbol in symbols_strats.keys()}
 
+    # bookkeeping
     # restore equity/order bookkeeping from a previous run (crash/restart safe)
     saved_state = _load_state()
     if saved_state is not None:
@@ -182,9 +183,8 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
             if time_last_wfa is None: # on first iteration
                 run_wfa = True
             else:
-                time_diff = (current_day_time - time_last_wfa).days 
-                if time_diff > wfa_in_sample_length: 
-                    run_wfa = True
+                time_diff = (current_day_time - time_last_wfa).days
+                run_wfa = time_diff > wfa_in_sample_length
             if run_wfa:
                 for symbol, strat in symbols_strats.items():
                     
@@ -281,9 +281,9 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                     # signal/features are evaluated on the last CLOSED bar, matching
                     # backtest_engine.py's timing (signal/features at t-1, entry at open of t)w + 1)
                     current_day_time = pd.to_datetime(current_day_time, unit = 's')
-                    data = mt5_conn.get_bars_range(symbol, 
-                                                   date_from = current_day_time, 
-                                                   date_to = current_day_time.normalize())
+                    data = mt5_conn.get_bars_range(symbol,
+                                                   date_from = current_day_time.normalize(),
+                                                   date_to = current_day_time)
                     
                     tob = data.iloc[-1, :] # forming bar - its open is the entry reference price
                     closed_data = data.iloc[:-1] # drop forming bar (last entry - values at snapshot)
@@ -366,6 +366,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
         # error printed to console 
         # events logged to notepad using log_event()
         # IPC link may still hold despite execption being raised 
+        # error raised by connect_account()
         except mt5_err.MT5ConnectionError as e:
             logging.error(f'{e}: connection lost, reconnecting') 
             time.sleep(5)
@@ -376,15 +377,18 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
             logging.error(f'{e}: batch fetch failed, will retry next poll')
             _reconnect_if_disconnected()
 
+        # error raised by position_get()
         except mt5_err.MT5PositionError as e:
             logging.error(f'{e}: get positions failed, position with ticket does not exist')
             _reconnect_if_disconnected()
 
+        # error riased by order_send()
         except mt5_err.MT5OrderError as e:
             logging.error(f'{e}: order failed, skipping this signal')
             log_cfg.log_event('order_rejected', error = str(e))
             _reconnect_if_disconnected()
 
+        # untraced errors
         except Exception as e:
             logging.error(f'{e}: un tracked failure')
             logging.exception('unhandled exception in live loop')
