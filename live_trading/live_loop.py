@@ -2,6 +2,9 @@
 Live MetaTrader5 trade execution logic 
 
 polling function that request and send trade information to MetaTrader5 terminal
+
+Fixes 
+- aadd time gating a out-of-sample live code flag
 """
 import os
 import sys
@@ -81,8 +84,8 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                   strat_ids: dict[str, int],
                   symbols_strats_kwargs: dict[str, dict] | None = None,
                   strat_weights: list[float] = [1 / 3] * 3,
-                  grid_search_atrs: np.ndarray = np.linspace(1.0, 3.0, 5), 
-                  grid_search_rrs: np.ndarray = np.linspace(1.0, 3.0, 5)):
+                  grid_search_atrs: np.ndarray = np.linspace(2.0, 5.0, 5), 
+                  grid_search_rrs: np.ndarray = np.linspace(2.0, 6.0, 5)):
     """multi-strategy logic"""
     log_cfg.setup_logging() # call once (dont re-initialise)
     while True:
@@ -284,7 +287,11 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                     data = mt5_conn.get_bars_range(symbol,
                                                    date_from = current_day_time.normalize(),
                                                    date_to = current_day_time)
-                    
+                    # check data not-empty, eg market closed on weekend and not quotes for day
+                    if data.empty:
+                        logging.warning(f'{symbol}: empty dataframe, market closed, skipping this poll')
+                        continue # skip and poll
+
                     tob = data.iloc[-1, :] # forming bar - its open is the entry reference price
                     closed_data = data.iloc[:-1] # drop forming bar (last entry - values at snapshot)
 
@@ -338,7 +345,12 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                             trade_value = position_sizing(tob.open, sl_dist, account_balance, fraction_risk)[0] # position notional in account currency
                             volume = trade_value / tob.open
                             max_volume_lots = account_balance / tob.open
-                            if mt5.symbol_info(symbol).currency_base is not None:
+                            # volume lots flag
+                            symbol_info = mt5.symbol_info(symbol)
+                            if symbol_info is None:
+                                logging.warning(f'{symbol}: symbol_info() unavailable, skipping this poll') 
+                                continue
+                            if symbol_info.path.split('\\')[0] == 'Forex':
                                 volume /= 1e5 # units of base currency -> standard forex lots
                                 max_volume_lots = max_volume_lots / 1e5 * max_fx_lev
                             else:
@@ -390,7 +402,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
 
         # untraced errors
         except Exception as e:
-            logging.error(f'{e}: un tracked failure')
+            logging.error(f'{e}: untracked failure')
             logging.exception('unhandled exception in live loop')
             _reconnect_if_disconnected()
 
