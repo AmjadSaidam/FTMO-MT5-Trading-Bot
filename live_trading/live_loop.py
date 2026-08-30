@@ -4,7 +4,7 @@ Live MetaTrader5 trade execution logic
 polling function that request and send trade information to MetaTrader5 terminal
 
 Fixes 
-- aadd time gating a out-of-sample live code flag
+- add time gating a out-of-sample live code flag
 """
 import os
 import sys
@@ -35,33 +35,6 @@ from code.backtest_engine import SignalFunc, risk_scaling, position_sizing
 from code.regime_filter import r2, categorise_regime
 from code.risk_management import atr, consecutive_loss_threshold, RandomForestVol
 import code.optimisation as opt
-
-# --- VARIABLE BOOKKEEPING ---
-def _load_state() -> dict | None:
-    """restores strategy equity/order bookkeeping saved by a previous run, if any"""
-    if not os.path.exists(STATE_PATH):
-        return None
-    with open(STATE_PATH) as f:
-        return json.load(f)
-
-def _save_state(state: dict):
-    """write-then-rename so a crash mid-write can't leave a corrupt/partial state file"""
-    os.makedirs(os.path.dirname(STATE_PATH), exist_ok = True)
-    tmp_path = STATE_PATH + '.tmp'
-    with open(tmp_path, 'w') as f: # write file
-        json.dump(state, f, default = float) # casts numpy floats (equity values) to plain float
-    os.replace(tmp_path, STATE_PATH)
-
-# --- CONNECTION LOGIC ---
-def _reconnect_if_disconnected():
-    """MT5RatesError/PositionError/OrderError can mean a lost terminal connection or a genuine
-    request error; only reconnect when terminal_info() confirms the IPC link is actually down"""
-    if not mt5_conn.is_connected():
-        logging.error('MT5 terminal connection lost, reconnecting')
-        time.sleep(5)
-        mt5_conn.connect_account() # will not print connection validation
-
-STATE_PATH = os.path.join(ROOT, 'logs', 'live_state.json')
 
 # --- MULTITIMEFRAME ---
 # strategies requiring 1h/4h/8h columns merged onto the base timeframe data, see app/dashboard.py
@@ -228,6 +201,13 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                 _persist()
 
             for symbol, strat in symbols_strats.items():
+                # symbol info
+                symbol_info = mt5.symbol_info(symbol)
+                if symbol_info is None:
+                    logging.warning(f'{symbol}: symbol_info() unavailable, skipping this poll') 
+                    continue
+                symbol_path = symbol_info.path.split('\\')[0]
+
                 # eod exit
                 if new_day:
                     # enable trading
@@ -280,18 +260,21 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                         continue # will not run subsequent code 
                     strategy_last_bar_time[symbol] = latest_bar_time
 
-                    # pull data. last row is the just-opened, still-forming bar - drop it so
-                    # signal/features are evaluated on the last CLOSED bar, matching
-                    # backtest_engine.py's timing (signal/features at t-1, entry at open of t)w + 1)
+                    # pull data, time range determined by asset class 
                     current_day_time = pd.to_datetime(current_day_time, unit = 's')
+                    data_from = current_day_time - pd.Timedelta(value = 1, unit = 'D')
+                    # pull only current day data for equities, anchord day vwap only requires current day data
+                    if symbol_path == 'Equities I CFD':
+                        data_from = current_day_time.normalize()
                     data = mt5_conn.get_bars_range(symbol,
-                                                   date_from = current_day_time.normalize(),
+                                                   date_from = data_from,
                                                    date_to = current_day_time)
                     # check data not-empty, eg market closed on weekend and not quotes for day
                     if data.empty:
                         logging.warning(f'{symbol}: empty dataframe, market closed, skipping this poll')
                         continue # skip and poll
 
+                    # seperate current data and historical data
                     tob = data.iloc[-1, :] # forming bar - its open is the entry reference price
                     closed_data = data.iloc[:-1] # drop forming bar (last entry - values at snapshot)
 
@@ -300,6 +283,10 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                     regime = categorise_regime(
                         closed_data.close.rolling(feature_window).apply(r2, raw = True)
                     )[-1]
+                    if pd.isna(regime):
+                        # not enough closed bars yet for the rolling regime window (eg. early in the day) - nothing to classify
+                        logging.warning(f'{symbol}: not enough bars to classify regime yet, skipping this poll')
+                        continue
                     breakout_conv = ((closed_data.close - closed_data.open) / (closed_data.high - closed_data.low)).iloc[-1]
                     rel_volume = closed_data.volume.rolling(feature_window).mean().iloc[-1]
                     point_features = {
@@ -346,15 +333,13 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                             volume = trade_value / tob.open
                             max_volume_lots = account_balance / tob.open
                             # volume lots flag
-                            symbol_info = mt5.symbol_info(symbol)
-                            if symbol_info is None:
-                                logging.warning(f'{symbol}: symbol_info() unavailable, skipping this poll') 
-                                continue
-                            if symbol_info.path.split('\\')[0] == 'Forex':
+                            if symbol_path == 'Forex':
                                 volume /= 1e5 # units of base currency -> standard forex lots
                                 max_volume_lots = max_volume_lots / 1e5 * max_fx_lev
                             else:
                                 max_volume_lots *= max_other_lev
+                            # snap to the broker's tradable lot increment (must be multiple of symbol volume increment)
+                            volume = round(volume / symbol_info.volume_step) * symbol_info.volume_step
                             # validate position size
                             if min_vol_lots <= volume <= max_volume_lots:
                                 # order to MT5
@@ -397,7 +382,8 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
         # error riased by order_send()
         except mt5_err.MT5OrderError as e:
             logging.error(f'{e}: order failed, skipping this signal')
-            log_cfg.log_event('order_rejected', error = str(e))
+            log_cfg.log_event('order_rejected', symbol = symbol, strategy = strat.__name__, reason = 'invalid position size', volume = volume, 
+                              opt_atr = strategy_opt_atr[symbol], opt_rr = strategy_opt_rr[symbol], min_volume = min_vol_lots, max_volume = max_volume_lots, error = str(e))
             _reconnect_if_disconnected()
 
         # untraced errors
@@ -409,6 +395,35 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
         # poll next request 
         time.sleep(1) # re-run logic every 1 second
 
+# --- HELPERS ---
+# --- VARIABLE BOOKKEEPING ---
+def _load_state() -> dict | None:
+    """restores strategy equity/order bookkeeping saved by a previous run, if any"""
+    if not os.path.exists(STATE_PATH):
+        return None
+    with open(STATE_PATH) as f:
+        return json.load(f)
+
+def _save_state(state: dict):
+    """write-then-rename so a crash mid-write can't leave a corrupt/partial state file"""
+    os.makedirs(os.path.dirname(STATE_PATH), exist_ok = True)
+    tmp_path = STATE_PATH + '.tmp'
+    with open(tmp_path, 'w') as f: # write file
+        json.dump(state, f, default = float) # casts numpy floats (equity values) to plain float
+    os.replace(tmp_path, STATE_PATH)
+
+# --- CONNECTION LOGIC ---
+def _reconnect_if_disconnected():
+    """MT5RatesError/PositionError/OrderError can mean a lost terminal connection or a genuine
+    request error; only reconnect when terminal_info() confirms the IPC link is actually down"""
+    if not mt5_conn.is_connected():
+        logging.error('MT5 terminal connection lost, reconnecting')
+        time.sleep(5)
+        mt5_conn.connect_account() # will not print connection validation
+
+STATE_PATH = os.path.join(ROOT, 'logs', 'live_state.json')
+
+# --- RUN SCRIPT ---
 if __name__ == '__main__':
     symbols_strats = {
         'GBPUSD': session_breakout,
