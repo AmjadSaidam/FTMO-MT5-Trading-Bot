@@ -106,17 +106,10 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
     # bookkeeping
     # restore equity/order bookkeeping from a previous run (crash/restart safe)
     saved_state = _load_state()
-    if saved_state is not None:
-        strategy_equity_dict.update(saved_state['strategy_equity_dict'])
-        strategy_open_tickets.update(saved_state['strategy_open_tickets'])
-        strategy_live_trade.update(saved_state['strategy_live_trade'])
-        strategy_consec_loss.update(saved_state['strategy_consec_loss'])
-        strategy_skip_trade.update(saved_state['strategy_skip_trade'])
-        if saved_state.get('time_last_wfa') is not None:
-            time_last_wfa = datetime.fromisoformat(saved_state['time_last_wfa']) # keeps IS/OOS window boundaries stable across a restart
-        logging.info('restored strategy equity/order and wfa time state from previous run')
 
-        # a restored ticket may have already closed (SL/TP) while this process was down
+    def update_state_dicts(reason: str = 'sl_tp_hit') -> bool:
+        """reconciles tickets against actual MT5 position state; returns True if any symbol's state changed"""
+        reconciled = False
         for symbol, tickets in strategy_open_tickets.items():
             if not tickets:
                 continue
@@ -127,7 +120,24 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                 strategy_open_tickets[symbol] = []
                 strategy_live_trade[symbol] = False
                 log_cfg.log_event('position_closed', symbol = symbol, ticket = tickets[-1],
-                                  reason = 'reconciled_on_restart', pnl = pnl)
+                                    reason = reason, pnl = pnl)
+                reconciled = True
+        return reconciled
+
+    if saved_state is not None:
+        # update the default dicts to match saved states
+        strategy_equity_dict.update(saved_state['strategy_equity_dict'])
+        strategy_open_tickets.update(saved_state['strategy_open_tickets'])
+        strategy_live_trade.update(saved_state['strategy_live_trade'])
+        strategy_consec_loss.update(saved_state['strategy_consec_loss'])
+        strategy_skip_trade.update(saved_state['strategy_skip_trade'])
+        if saved_state.get('time_last_wfa') is not None:
+            # pull last wfa run time
+            time_last_wfa = datetime.fromisoformat(saved_state['time_last_wfa']) # keeps IS/OOS window boundaries stable across a restart
+        logging.info('restored strategy equity/order and wfa time state from previous run')
+
+        # a restored ticket may have already closed (SL/TP) while this process was down
+        update_state_dicts(reason = 'reconciled_on_restart')
 
     def _persist():
         _save_state({
@@ -392,11 +402,18 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
             logging.exception('unhandled exception in live loop')
             _reconnect_if_disconnected()
 
+        # update states dicts, fires only if position ticket was closes 
+        if update_state_dicts():
+            _persist()
+        _persist()
+
         # poll next request 
         time.sleep(1) # re-run logic every 1 second
 
 # --- HELPERS ---
 # --- VARIABLE BOOKKEEPING ---
+STATE_PATH = os.path.join(ROOT, 'logs', 'live_state.json')
+
 def _load_state() -> dict | None:
     """restores strategy equity/order bookkeeping saved by a previous run, if any"""
     if not os.path.exists(STATE_PATH):
@@ -421,7 +438,6 @@ def _reconnect_if_disconnected():
         time.sleep(5)
         mt5_conn.connect_account() # will not print connection validation
 
-STATE_PATH = os.path.join(ROOT, 'logs', 'live_state.json')
 
 # --- RUN SCRIPT ---
 if __name__ == '__main__':
