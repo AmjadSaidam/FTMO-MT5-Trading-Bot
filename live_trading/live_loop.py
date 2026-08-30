@@ -97,11 +97,49 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
 
     # ml risk management
     feature_window = int(os.environ.get('META_ML_FEATURE_WINDOW'))
-    strategy_models = {}
+    strategy_models = {} # save to states on restart
 
     # performance
     strategy_skip_trade = {symbol: False for symbol in symbols_strats.keys()}
     strategy_consec_loss = {symbol: 0 for symbol in symbols_strats.keys()}
+
+    def _train_models(as_of_time):
+        """(re)trains strategy_models/strategy_opt_atr/strategy_opt_rr for every symbol off the
+        current IS window; does not touch time_last_wfa, so it's safe to call outside the WFA schedule"""
+        strat_equity = sum(strategy_equity_dict.values())
+        for symbol, strat in symbols_strats.items():
+
+            # data, drop the still-forming last bar so training only sees closed bars
+            # date-range fetch (not a bar count) so the window is exactly wfa_in_sample_length
+            # calendar days regardless of the symbol's trading session length (24/7 crypto vs FX vs equity hours)
+            wfa_data = mt5_conn.get_bars_range(symbol,
+                                               date_from = as_of_time - timedelta(days = wfa_in_sample_length),
+                                               date_to = as_of_time).iloc[:-1]
+            wfa_data = add_multi_timeframe_columns(strat, wfa_data)
+            # run grid search
+            gd_params = opt.grid_search_params(data = wfa_data,
+                                               strat = strat,
+                                               strat_kwargs = (symbols_strats_kwargs or {}).get(symbol) or {},
+                                               account_balance = strat_equity,
+                                               atr_multilpiers = grid_search_atrs,
+                                               risk_rewards = grid_search_rrs)
+            gd_res = opt.run_grid_search(gd_params)
+            gd_metadata = opt.grid_search_statistics(gd_res, grid_search_atrs, grid_search_rrs)
+
+            # grid search parameters
+            gd_opt_frame: pd.DataFrame = gd_metadata['opt_df']
+
+            # train ensemble model
+            ml_features_in_sample = gd_opt_frame.loc[:, ['atr_pct', 'regime', 'breakout_conv', 'rel_volume']]
+            ensemble = RandomForestVol(ml_features_in_sample, gd_opt_frame['ml_label'], 'regime')
+            ensemble.train_model(train_split = 1) # trained model appended to class attribute
+            if ensemble.model is None:
+                logging.warning(f'{symbol}: not enough labelled in-sample trades to train model, trading skipped until next WFA cycle')
+
+            # optimal values
+            strategy_models[symbol] = ensemble
+            strategy_opt_atr[symbol] = gd_metadata['opt_atr']
+            strategy_opt_rr[symbol] = gd_metadata['opt_rr']
 
     # bookkeeping
     # restore equity/order bookkeeping from a previous run (crash/restart safe)
@@ -134,6 +172,19 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
         if saved_state.get('time_last_wfa') is not None:
             # pull last wfa run time
             time_last_wfa = datetime.fromisoformat(saved_state['time_last_wfa']) # keeps IS/OOS window boundaries stable across a restart
+            # strategy_models isn't persisted (holds trained sklearn objects, not JSON-serialisable) and
+            # is always empty on a fresh process - rebuild it off the restored IS window now, without
+            # touching time_last_wfa/the WFA schedule, so polling doesn't KeyError on strategy_models[symbol]
+            # until the next scheduled WFA cycle (which may be days away)
+            logging.info('rebuilding in-memory strategy models after restart (not persisted across runs)')
+            try:
+                _train_models(time_last_wfa)
+            except Exception as e:
+                # runs before the polling loop's own try/except, so a transient MT5 fetch error here
+                # would otherwise crash startup entirely; force run_wfa on the next poll instead so the
+                # retry goes through the loop's normal (retried, exception-handled) path
+                logging.error(f'{e}: failed to rebuild strategy models after restart, will retry on next poll')
+                time_last_wfa = None
         logging.info('restored strategy equity/order and wfa time state from previous run')
 
         # a restored ticket may have already closed (SL/TP) while this process was down
@@ -163,51 +214,15 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
             else:
                 new_day = False
 
-            strat_equity = sum(strategy_equity_dict.values())
-            
-            # wfa 
+            # wfa
             if time_last_wfa is None: # on first iteration
                 run_wfa = True
             else:
                 time_diff = (current_day_time - time_last_wfa).days
                 run_wfa = time_diff > wfa_in_sample_length
             if run_wfa:
-                for symbol, strat in symbols_strats.items():
-                    
-                    # data, drop the still-forming last bar so training only sees closed bars
-                    # date-range fetch (not a bar count) so the window is exactly wfa_in_sample_length
-                    # calendar days regardless of the symbol's trading session length (24/7 crypto vs FX vs equity hours)
-                    wfa_data = mt5_conn.get_bars_range(symbol,
-                                                       date_from = current_day_time - timedelta(days = wfa_in_sample_length),
-                                                       date_to = current_day_time).iloc[:-1]
-                    wfa_data = add_multi_timeframe_columns(strat, wfa_data)
-                    # run grid search
-                    gd_params = opt.grid_search_params(data = wfa_data,
-                                                       strat = strat,
-                                                       strat_kwargs = (symbols_strats_kwargs or {}).get(symbol) or {},
-                                                       account_balance = strat_equity,
-                                                       atr_multilpiers = grid_search_atrs,
-                                                       risk_rewards = grid_search_rrs)
-                    gd_res = opt.run_grid_search(gd_params)
-                    gd_metadata = opt.grid_search_statistics(gd_res, grid_search_atrs, grid_search_rrs)
-                    
-                    # grid search parameters
-                    gd_opt_frame: pd.DataFrame = gd_metadata['opt_df']
-
-                    # train ensemble model
-                    ml_features_in_sample = gd_opt_frame.loc[:, ['atr_pct', 'regime', 'breakout_conv', 'rel_volume']]
-                    ensemble = RandomForestVol(ml_features_in_sample, gd_opt_frame['ml_label'], 'regime')
-                    ensemble.train_model(train_split = 1) # trained model appended to class attribute
-                    if ensemble.model is None:
-                        logging.warning(f'{symbol}: not enough labelled in-sample trades to train model, trading skipped until next WFA cycle')
-
-                    # optimal values 
-                    strategy_models[symbol] = ensemble
-                    strategy_opt_atr[symbol] = gd_metadata['opt_atr']
-                    strategy_opt_rr[symbol] = gd_metadata['opt_rr']
-
-                    # update timeframe
-                    time_last_wfa = current_day_time
+                _train_models(current_day_time)
+                time_last_wfa = current_day_time
                 _persist()
 
             for symbol, strat in symbols_strats.items():
@@ -405,8 +420,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
         # update states dicts, fires only if position ticket was closes 
         if update_state_dicts():
             _persist()
-        _persist()
-
+            
         # poll next request 
         time.sleep(1) # re-run logic every 1 second
 
