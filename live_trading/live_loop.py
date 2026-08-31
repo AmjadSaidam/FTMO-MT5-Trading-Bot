@@ -248,7 +248,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                 if symbol_info is None:
                     logging.warning(f'{symbol}: symbol_info() unavailable, skipping this poll') 
                     continue
-                symbol_path = symbol_info.path.split('\\')[0]
+                asset_class = symbol_info.path.split('\\')[0]
 
                 # strategy ticket
                 ticket = strategy_open_tickets.get(symbol)
@@ -294,12 +294,10 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                         continue # will not run subsequent code 
                     strategy_last_bar_time[symbol] = latest_bar_time
 
-                    # pull data, time range determined by asset class 
+                    # pull data
+                    # pull 4 days of data, to ensure features are not None on last closed bar (account for weekends + hoilday days)
                     current_day_time = pd.to_datetime(current_day_time, unit = 's')
-                    data_from = current_day_time - pd.Timedelta(value = 1, unit = 'D')
-                    # pull only current day data for equities, anchord day vwap only requires current day data
-                    if symbol_path == 'Equities I CFD':
-                        data_from = current_day_time.normalize()
+                    data_from = current_day_time - pd.Timedelta(days = 4)
                     data = mt5_conn.get_bars_range(symbol,
                                                    date_from = data_from,
                                                    date_to = current_day_time)
@@ -371,7 +369,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                             volume = trade_value / tob.open
                             max_volume_lots = account_balance / tob.open
                             # volume lots flag
-                            if symbol_path == 'Forex':
+                            if asset_class == 'Forex':
                                 volume /= 1e5 # units of base currency -> standard forex lots
                                 max_volume_lots = max_volume_lots / 1e5 * max_fx_lev
                             else:
