@@ -83,6 +83,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
     strategy_live_trade = {symbol: False for symbol in symbols_strats.keys()} # track signal per symbol (max 1 order per symbol per day )
     strategy_open_tickets = {symbol: [] for symbol in symbols_strats.keys()} # order history
     strategy_last_bar_time = {symbol: None for symbol in symbols_strats.keys()} # track most recent bar (only request data and run strategy logic once per new bar)
+    strategy_traded_today = {symbol: False for symbol in symbols_strats.keys()} # track trade limit per aasset 
 
     # schedule times
     wfa_in_sample_length = int(os.environ.get('META_WFA_IN_SAMPLE_DAYS'))
@@ -151,24 +152,27 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
         for symbol, tickets in strategy_open_tickets.items():
             if not tickets:
                 continue
-            if not mt5_conn.get_positions(ticket = tickets[-1]):
+            # live ticket (position still open)
+            if not mt5_conn.get_positions(ticket = tickets[-1]): # named tuple of order metadata 
                 pnl = mt5_conn.get_deal_profit(tickets[-1])
                 strategy_consec_loss[symbol] = 0 if pnl > 0 else strategy_consec_loss[symbol] + 1
                 strategy_equity_dict[symbol] += pnl
                 strategy_open_tickets[symbol] = []
                 strategy_live_trade[symbol] = False
-                log_cfg.log_event('position_closed', symbol = symbol, ticket = tickets[-1],
-                                    reason = reason, pnl = pnl)
+                log_cfg.log_event('position_closed', symbol = symbol, ticket = tickets[-1], reason = reason, pnl = pnl)
                 reconciled = True
         return reconciled
 
+    # run once on restart/crash 
     if saved_state is not None:
-        # update the default dicts to match saved states
+        # update the default dicts to match saved states 
+        # ensures dict persistance on restarts
         strategy_equity_dict.update(saved_state['strategy_equity_dict'])
         strategy_open_tickets.update(saved_state['strategy_open_tickets'])
         strategy_live_trade.update(saved_state['strategy_live_trade'])
         strategy_consec_loss.update(saved_state['strategy_consec_loss'])
         strategy_skip_trade.update(saved_state['strategy_skip_trade'])
+        strategy_traded_today.update(saved_state['strategy_traded_today'])
         if saved_state.get('time_last_wfa') is not None:
             # pull last wfa run time
             time_last_wfa = datetime.fromisoformat(saved_state['time_last_wfa']) # keeps IS/OOS window boundaries stable across a restart
@@ -198,6 +202,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
             'strategy_consec_loss': strategy_consec_loss,
             'strategy_skip_trade': strategy_skip_trade,
             'time_last_wfa': time_last_wfa.isoformat() if (time_last_wfa is not None) else None,
+            'strategy_traded_today': strategy_traded_today
         })
 
     if saved_state is not None:
@@ -235,6 +240,8 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
 
                 # eod exit
                 if new_day:
+                    # reset max trades guard 
+                    strategy_traded_today[symbol] = False
                     # enable trading
                     strategy_skip_trade[symbol] = False
                     # strategy ticket
@@ -273,12 +280,13 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                             log_cfg.log_event('position_closed', symbol = symbol, ticket = ticket[-1],
                                               reason = 'eod_force_close', pnl = pnl)
                         strategy_live_trade[symbol] = False # flat going into the new day, allow re-entry
+                    # commit updates to state dict
                     _persist()
 
-                live_trade = strategy_live_trade[symbol]
-
                 # signal logic (ran once ber new bar)
-                if not live_trade:
+                # guard against pyrammiding orders and re-entry after an earlier close the same day
+                live_trade = strategy_live_trade[symbol]
+                if not live_trade and not strategy_traded_today[symbol]:
                     # skip until a new bar has closed, avoids re-fetching/re-evaluating every 1s poll
                     latest_bar_time = mt5_conn.get_latest_bar_time(symbol)
                     if latest_bar_time == strategy_last_bar_time[symbol]:
@@ -372,11 +380,14 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                                 strategy_live_trade[symbol] = True
                                 # symbol order id
                                 strategy_open_tickets[symbol].append(order.order) # ticket is named tuple field
+                                # traded today 
+                                strategy_traded_today[symbol] = True
                                 # order sent/executed log
                                 log_cfg.log_event('order_sent', symbol = symbol, strategy = strat.__name__,
                                                 ticket = order.order, type = type, volume = volume,
                                                 opt_atr = strategy_opt_atr[symbol], opt_rr = strategy_opt_rr[symbol],
                                                 sl = sl, tp = tp, magic = trade_magic_id)
+                                # commit changes to state dict
                                 _persist()
                             else:
                                 log_cfg.log_event('order_rejected', symbol = symbol, strategy = strat.__name__,
