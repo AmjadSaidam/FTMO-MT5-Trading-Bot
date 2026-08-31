@@ -9,7 +9,6 @@ Fixes
 import os
 import sys
 import json
-from collections import defaultdict
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -56,7 +55,7 @@ def add_multi_timeframe_columns(strat: SignalFunc,
 def run_live_loop(symbols_strats: dict[str, SignalFunc],
                   strat_ids: dict[str, int],
                   symbols_strats_kwargs: dict[str, dict] | None = None,
-                  strat_weights: list[float] = [1 / 3] * 3,
+                  strat_weights: float | None = None,
                   grid_search_atrs: np.ndarray = np.linspace(2.0, 5.0, 5), 
                   grid_search_rrs: np.ndarray = np.linspace(2.0, 6.0, 5)):
     """multi-strategy logic"""
@@ -78,6 +77,11 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
     initial_account_balance = os.environ.get('META_INITIAL_ACCOUNT_BALANCE')
 
     # account default arrays
+    if strat_weights is None: 
+        n = len(symbols_strats)
+        strat_weights = [1 / n] * n 
+
+    strategy_weights = dict(zip(symbols_strats.keys(), strat_weights))
     initial_strategy_allocation = np.array(strat_weights) * float(initial_account_balance)
     strategy_equity_dict = {symbol: initial_strategy_allocation[strat_no] for strat_no, symbol in enumerate(symbols_strats.keys())} # initial strategy allocation in $
     strategy_live_trade = {symbol: False for symbol in symbols_strats.keys()} # track signal per symbol (max 1 order per symbol per day )
@@ -103,6 +107,9 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
     # performance
     strategy_skip_trade = {symbol: False for symbol in symbols_strats.keys()}
     strategy_consec_loss = {symbol: 0 for symbol in symbols_strats.keys()}
+
+    def _update_strat_weight(symbol):
+        strategy_weights[symbol] = strategy_equity_dict[symbol] / sum(strategy_equity_dict.values())
 
     def _train_models(as_of_time):
         """(re)trains strategy_models/strategy_opt_atr/strategy_opt_rr for every symbol off the
@@ -144,6 +151,9 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
 
     # bookkeeping
     # restore equity/order bookkeeping from a previous run (crash/restart safe)
+    acc_info = mt5.account_info()
+    if acc_info is not None:
+        initial_account_balance = acc_info.balance
     saved_state = _load_state()
 
     def update_state_dicts(reason: str = 'sl_tp_hit') -> bool:
@@ -153,12 +163,13 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
             if not tickets:
                 continue
             # live ticket (position still open)
-            if not mt5_conn.get_positions(ticket = tickets[-1]): # named tuple of order metadata 
+            if not mt5_conn.get_positions(ticket = tickets[-1]): # named tuple of order metadata
                 pnl = mt5_conn.get_deal_profit(tickets[-1])
                 strategy_consec_loss[symbol] = 0 if pnl > 0 else strategy_consec_loss[symbol] + 1
                 strategy_equity_dict[symbol] += pnl
                 strategy_open_tickets[symbol] = []
                 strategy_live_trade[symbol] = False
+                _update_strat_weight(symbol)
                 log_cfg.log_event('position_closed', symbol = symbol, ticket = tickets[-1], reason = reason, pnl = pnl)
                 reconciled = True
         return reconciled
@@ -167,6 +178,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
     if saved_state is not None:
         # update the default dicts to match saved states 
         # ensures dict persistance on restarts
+        strategy_weights.update(saved_state['strategy_weights'])
         strategy_equity_dict.update(saved_state['strategy_equity_dict'])
         strategy_open_tickets.update(saved_state['strategy_open_tickets'])
         strategy_live_trade.update(saved_state['strategy_live_trade'])
@@ -196,6 +208,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
 
     def _persist():
         _save_state({
+            'strategy_weights': strategy_weights,
             'strategy_equity_dict': strategy_equity_dict,
             'strategy_open_tickets': strategy_open_tickets,
             'strategy_live_trade': strategy_live_trade,
@@ -230,40 +243,28 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                 time_last_wfa = current_day_time
                 _persist()
 
+            # get symbol info
             for symbol, strat in symbols_strats.items():
-                # symbol info
                 symbol_info = mt5.symbol_info(symbol)
                 if symbol_info is None:
                     logging.warning(f'{symbol}: symbol_info() unavailable, skipping this poll') 
                     continue
                 symbol_path = symbol_info.path.split('\\')[0]
 
+                # strategy ticket
+                ticket = strategy_open_tickets.get(symbol)
                 # eod exit
                 if new_day:
+                    # enable live trading
+                    strategy_live_trade[symbol] = False # flat going into the new day, allow re-entry
                     # reset max trades guard 
                     strategy_traded_today[symbol] = False
                     # enable trading
                     strategy_skip_trade[symbol] = False
-                    # strategy ticket
-                    ticket = strategy_open_tickets.get(symbol)
+                    # check ticket open 
                     if ticket:
                         positions = mt5_conn.get_positions(ticket = ticket[-1])
-                        # sl/tp hit
-                        if not positions:
-                            # check consec loss 
-                            pnl = mt5_conn.get_deal_profit(ticket[-1])
-                            if pnl > 0:
-                                strategy_consec_loss[symbol] = 0
-                            else:
-                                strategy_consec_loss[symbol] += 1
-                            # update strat equity 
-                            strategy_equity_dict[symbol] += pnl
-                            # reset order history
-                            strategy_open_tickets[symbol] = [] # positions returns (), clear rather than delete the key so future orders can still append
-                            # log 
-                            log_cfg.log_event('position_closed', symbol = symbol, ticket = ticket[-1],
-                                              reason = 'sl_tp_hit', pnl = pnl)
-                        else:
+                        if positions:
                             # trade-live force close
                             mt5_conn.close_position(positions[-1]) # close most recent position
                             pnl = mt5_conn.get_deal_profit(ticket[-1])
@@ -276,10 +277,11 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                             strategy_equity_dict[symbol] += pnl
                             # reset order history
                             strategy_open_tickets[symbol] = [] 
+                            # update weights
+                            _update_strat_weight(symbol)
                             # log
                             log_cfg.log_event('position_closed', symbol = symbol, ticket = ticket[-1],
                                               reason = 'eod_force_close', pnl = pnl)
-                        strategy_live_trade[symbol] = False # flat going into the new day, allow re-entry
                     # commit updates to state dict
                     _persist()
 
@@ -364,9 +366,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                             tp = tob.open + sl_dist * strategy_opt_rr[symbol] * signal_direction
                             # strat account balance
                             account_balance = sum(strategy_equity_dict.values()) # assumes all position closed (100% free margin)
-                            strat_account_balance = strategy_equity_dict.get(symbol)
-                            strat_weight = strat_account_balance / account_balance
-                            fraction_risk = strat_weight * frac_risked # per strategy
+                            fraction_risk = strategy_weights[symbol] * frac_risked # per strategy
                             # volume
                             trade_value = position_sizing(tob.open, sl_dist, account_balance, fraction_risk)[0] # position notional in account currency
                             volume = trade_value / tob.open
@@ -434,7 +434,8 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
             logging.exception('unhandled exception in live loop')
             _reconnect_if_disconnected()
 
-        # update states dicts, fires only if position ticket was closes 
+        # update states dicts
+        # fires only if position ticket was closed 
         if update_state_dicts():
             _persist()
             
