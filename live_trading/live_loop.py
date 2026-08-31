@@ -175,23 +175,22 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
         return reconciled
 
     # run once on restart/crash 
+    # only updates dict, if script has run prior to restart/crash
     if saved_state is not None:
-        # update the default dicts to match saved states 
+        # update the default dicts to match saved states
         # ensures dict persistance on restarts
-        strategy_weights.update(saved_state['strategy_weights'])
-        strategy_equity_dict.update(saved_state['strategy_equity_dict'])
-        strategy_open_tickets.update(saved_state['strategy_open_tickets'])
-        strategy_live_trade.update(saved_state['strategy_live_trade'])
-        strategy_consec_loss.update(saved_state['strategy_consec_loss'])
-        strategy_skip_trade.update(saved_state['strategy_skip_trade'])
-        strategy_traded_today.update(saved_state['strategy_traded_today'])
+        strategy_weights.update(saved_state.get('strategy_weights', strategy_weights))
+        strategy_equity_dict.update(saved_state.get('strategy_equity_dict', strategy_equity_dict))
+        strategy_open_tickets.update(saved_state.get('strategy_open_tickets', strategy_open_tickets))
+        strategy_live_trade.update(saved_state.get('strategy_live_trade', strategy_live_trade))
+        strategy_consec_loss.update(saved_state.get('strategy_consec_loss', strategy_consec_loss))
+        strategy_skip_trade.update(saved_state.get('strategy_skip_trade', strategy_skip_trade))
+        strategy_traded_today.update(saved_state.get('strategy_traded_today', strategy_traded_today))
         if saved_state.get('time_last_wfa') is not None:
             # pull last wfa run time
             time_last_wfa = datetime.fromisoformat(saved_state['time_last_wfa']) # keeps IS/OOS window boundaries stable across a restart
-            # strategy_models isn't persisted (holds trained sklearn objects, not JSON-serialisable) and
-            # is always empty on a fresh process - rebuild it off the restored IS window now, without
-            # touching time_last_wfa/the WFA schedule, so polling doesn't KeyError on strategy_models[symbol]
-            # until the next scheduled WFA cycle (which may be days away)
+            # strategy_models isn't persisted (holds trained sklearn objects, not JSON-serialisable) 
+            # re-runs on identical data-set to ensure wfa allignment
             logging.info('rebuilding in-memory strategy models after restart (not persisted across runs)')
             try:
                 _train_models(time_last_wfa)
