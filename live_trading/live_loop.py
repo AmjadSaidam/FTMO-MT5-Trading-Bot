@@ -341,12 +341,18 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                     if not strategy_skip_trade[symbol]:
                         # generate signal off the last closed bar
                         strat_data = add_multi_timeframe_columns(strat, closed_data)
+                        # signal is bolean array and signal_direction is numeric encoded long/short array
                         signal_series, signal_direction_arr = strat(strat_data, **((symbols_strats_kwargs or {}).get(symbol) or {}))
-                        signal, signal_direction = signal_series.iloc[-1], signal_direction_arr[-1]
+                        if (signal_series.shape[0] > 0) and (signal_direction_arr.shape[0] > 0):
+                            signal, signal_direction = signal_series.iloc[-1], signal_direction_arr[-1]
+                        else: 
+                            # write error to /live_trading.log
+                            logging.warning('zero_length_signal', symbol = symbol, strategy = strat.__name__)
+                            continue
                         if signal:
-                            # signal log 
-                            log_cfg.log_event('signal_generated', symbol = symbol, strategy = strat.__name__,
-                                              direction = int(signal_direction), valid_trade = bool(valid_trade))
+                            # write update to /trades.log
+                            log_cfg.log_event('signal_generated', symbol = symbol, strategy = strat.__name__, direction = int(signal_direction), valid_trade = bool(valid_trade))
+                        
                         if signal and valid_trade:
                             # type
                             type = 'LONG' if (signal_direction == 1) else 'SHORT' if (signal_direction == -1) else 0
