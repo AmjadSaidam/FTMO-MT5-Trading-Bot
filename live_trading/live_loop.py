@@ -30,7 +30,7 @@ import mt5_errors as mt5_err
 import logging_config as log_cfg
 from code.trading_strategies import (session_breakout, vwap_breakout, bollinger_band_cdv,
                                      lower_to_higher_timeframe, concatenate_timeframe_data)
-from code.backtest_engine import SignalFunc, risk_scaling, position_sizing
+from code.backtest_engine import SignalFunc, position_sizing
 from code.regime_filter import r2, categorise_regime
 from code.risk_management import atr, consecutive_loss_threshold, RandomForestVol
 import code.optimisation as opt
@@ -254,8 +254,6 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                 ticket = strategy_open_tickets.get(symbol)
                 # eod exit
                 if new_day:
-                    # enable live trading
-                    strategy_live_trade[symbol] = False # flat going into the new day, allow re-entry
                     # reset max trades guard 
                     strategy_traded_today[symbol] = False
                     # enable trading
@@ -274,6 +272,8 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                                 strategy_consec_loss[symbol] += 1
                             # update strat equity 
                             strategy_equity_dict[symbol] += pnl
+                            # trade no longer live 
+                            strategy_live_trade[symbol] = False # flat going into the new day, allow re-entry
                             # reset order history
                             strategy_open_tickets[symbol] = [] 
                             # update weights
@@ -352,15 +352,17 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                             # write update to /trades.log
                             log_cfg.log_event('signal_generated', symbol = symbol, strategy = strat.__name__, direction = int(signal_direction), valid_trade = bool(valid_trade))
                         
+                        # signal evaluated at most recent closed bar
                         if signal and valid_trade:
                             # type
                             type = 'LONG' if (signal_direction == 1) else 'SHORT' if (signal_direction == -1) else 0
                             # magin id
                             trade_magic_id = strat_ids.get(symbol)
-                            # stop and tp, priced off the new bar's open (the actual entry fill reference)
+                            # stop and tp at current bar open (prior bar signal)
+                            # round quotes to asset listed precision - otherwise order rejects
                             sl_dist = symbol_atr * strategy_opt_atr[symbol]
-                            sl = tob.open - sl_dist * signal_direction
-                            tp = tob.open + sl_dist * strategy_opt_rr[symbol] * signal_direction
+                            sl = round(tob.open - sl_dist * signal_direction, symbol_info.digits)
+                            tp = round(tob.open + sl_dist * strategy_opt_rr[symbol] * signal_direction, symbol_info.digits)
                             # strat account balance
                             account_balance = sum(strategy_equity_dict.values()) # assumes all position closed (100% free margin)
                             fraction_risk = strategy_weights[symbol] * frac_risked # per strategy
