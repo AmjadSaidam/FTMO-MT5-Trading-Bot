@@ -1,0 +1,194 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Amjad_S
+//@version=6
+
+//+------------------------------------------------------------------+
+//                                                         INDICATOR |
+//<<+----------------------------------------------------------------+{
+indicator('FOREX TRADING STRATEGY', 
+     overlay = true)
+
+//+------------------------------------------------------------------+}
+//                                                            INPUTS |
+//<<+----------------------------------------------------------------+{
+// candle body threshold ---------------------------------------------
+float candle_thresh = input(0.1, title = '1H Body to Wick Ratio')
+
+// higher timeframes -------------------------------------------------
+bool i_s1h = input(true, title = '1H')
+bool i_s4h = input(true, title = '4H')
+bool i_s8h = input(true, title = '8H')
+
+// sl and tp 
+atr = ta.atr(14)
+float atr_mult = input(3.0, title = 'ATR SL MULTIPLIER')
+float rr = input(1.0, title = 'RISK REWARD')
+
+//>>+----------------------------------------------------------------+}
+//                                           TRAILING SESSION PRINTS |
+//<<+----------------------------------------------------------------+{
+print_htf(t_true, t) =>
+
+    var session_open = float(na)
+    var session_high = float(na)
+    var session_low = float(na)
+    
+    var start_high = float(na)
+    var start_low = float(na)
+
+    var higher_timeframe_close = float(na)
+
+    is_new_session = ta.change(source = time(timeframe = t)) != 0 // non zero when first bar of timeframe
+    if t_true
+        // first bar of new session 
+        if is_new_session
+            start_high := high 
+            start_low := low
+            
+            session_open := open 
+            
+            session_high := na
+            session_low := na
+        // session bars 
+        else
+            session_high := na(session_high) ? start_high : math.max(session_high, high)
+            session_low := na(session_low) ? start_low : math.min(session_low, low) 
+    // signals 
+    else
+        na
+    
+    [session_open, session_high, session_low] 
+
+min_1h = 60 
+min_4h = min_1h * 4
+min_8h = min_1h * 8
+
+higher_time_frames() =>
+    [htf1_o, htf1_h, htf1_l] = print_htf(i_s1h, str.tostring(min_1h))
+    [htf2_o, htf2_h, htf2_l] = print_htf(i_s4h, str.tostring(min_4h))
+    [htf3_o, htf3_h, htf3_l] = print_htf(i_s8h, str.tostring(min_8h))
+    
+    [htf1_o, htf1_h, htf1_l,
+         htf2_o, htf2_h, htf2_l, 
+         htf3_o, htf3_h, htf3_l]
+
+[htf1_o, htf1_h, htf1_l, 
+     htf2_o, htf2_h, htf2_l, 
+     htf3_o, htf3_h, htf3_l] = higher_time_frames()
+
+//>>+----------------------------------------------------------------+}
+//                                                        CONFLUENCE |
+//<<+----------------------------------------------------------------+{
+// candle body threshold ---------------------------------------------
+candle_body_threshold(o, h, l, c, threshold) => 
+    body_size = math.abs(o - c)    
+    body_wick_ratio = body_size / (h - l)
+    body_wick_ratio > threshold ? true : false
+
+valid_candle = candle_body_threshold(htf1_o, htf1_h, htf1_l, close, candle_thresh)
+
+// session overlap ---------------------------------------------------
+ctm_time_session(chart_tfm, ses_ ,IANA_) =>
+    //+{
+    // returns true when timeframe is active, false otherwise
+    //+}
+    not na(time(chart_tfm, ses_, IANA_)) ? true : false 
+
+// LDN
+string TZ_GMT = "Europe/London" // UTC offset + 1:00
+GMT = ctm_time_session(timeframe.period, "0800-1630", TZ_GMT)
+
+// NY 
+string TZ_NY = "America/New_York" // UTC offset - 4:00
+NY = ctm_time_session(timeframe.period, "0930-1600", TZ_NY)
+
+timeframe_cross = GMT or NY
+
+//>>+----------------------------------------------------------------+}
+//                                                           SIGNALS |
+//<<+----------------------------------------------------------------+{
+// long breakout 
+long_signal = (close < htf3_o) and (close > htf2_o) and (close > htf1_o) 
+long_signal_conf = long_signal and valid_candle and timeframe_cross
+
+// short breakout
+short_signal = (close > htf3_o) and (close < htf2_o) and (close < htf1_o) 
+short_signal_conf = short_signal and valid_candle and timeframe_cross
+
+// valid trades
+long_valid = long_signal_conf[1]
+short_valid = short_signal_conf[1]
+
+//>>+----------------------------------------------------------------+}
+//                                                           SL & TP |
+//<<+----------------------------------------------------------------+{
+rd(val) =>
+    math.round(val, 5)
+
+sl_tp(order) =>
+    side = order == 'long' ? 1 : order == 'short' ? -1 : na 
+    sl_dist = atr * atr_mult 
+    sl = rd(open - sl_dist * side)
+    tp = rd(open + sl_dist * side * rr)
+    [sl, tp]
+
+//>>+----------------------------------------------------------------+}
+//                                                  VALIDATE SIGNALS |
+//<<+----------------------------------------------------------------+{
+long_trigger = long_valid and not long_valid[1]
+short_trigger = short_valid and not short_valid[1] 
+
+var FirstTrade = bool(na) 
+
+if timeframe.change('D')
+    FirstTrade := false 
+else
+    if long_trigger or short_trigger
+        FirstTrade := true
+
+FirstTradeValid = FirstTrade and not FirstTrade[1]
+
+//>>+----------------------------------------------------------------+}
+//                                                      SIGNAL PLOTS |
+//<<+----------------------------------------------------------------+{
+if long_trigger
+    [sl, tp] = sl_tp('long')
+
+    label.new(x = bar_index, y = low, 
+        text = 'long' + '\n' + 'sl: @' + str.tostring(sl) + '\n' + 'tp: @' + str.tostring(tp), 
+        color = FirstTradeValid ? color.green : color.gray,
+        style = label.style_label_up)
+
+    if FirstTradeValid
+        alert(message = "LONG " + syminfo.ticker + " " + timeframe.period + " ent: @" + str.tostring(close, format.mintick) + 'sl: @' + str.tostring(sl) + 'tp: @' + str.tostring(tp),
+             freq = alert.freq_once_per_bar)
+
+if short_trigger
+    [sl, tp] = sl_tp('short')
+
+    label.new(x = bar_index, y = high, 
+        text = 'short' + '\n' + 'sl: @' + str.tostring(sl) + '\n' + 'tp: @' + str.tostring(tp), 
+        color = FirstTradeValid ? color.red : color.gray,
+        style = label.style_label_down)
+
+    if FirstTradeValid
+        alert(message = "SHORT " + syminfo.ticker + " " + timeframe.period + " ent: @" + str.tostring(close, format.mintick) + 'sl: @' + str.tostring(sl) + 'tp: @' + str.tostring(tp),
+             freq = alert.freq_once_per_bar)
+
+//>>+----------------------------------------------------------------+}
+//                                                       TIMES PLOTS |
+//<<+----------------------------------------------------------------+{
+plt_label = 'HIGHER TIME FRAME'
+
+bool is_h1 = timeframe.change(str.tostring(min_1h))
+bool is_h4 = timeframe.change(str.tostring(min_4h))
+bool is_h8 = timeframe.change(str.tostring(min_8h))
+
+plot(htf1_h, title = plt_label + '1 HIGH', color = color.lime, style = plot.style_linebr)
+plot(htf1_l, title = plt_label + '1 LOW', color = color.red, style = plot.style_linebr)
+
+plot(htf2_h, title = plt_label + '2 HIGH', color = color.green, style = plot.style_linebr)
+plot(htf2_l, title = plt_label + '3 LOW', color = color.purple, style = plot.style_linebr)
+
+plot(htf3_h, title = plt_label + '3 HIGH', color = color.teal, style = plot.style_linebr)
+plot(htf3_l, title = plt_label + '3 LOW', color = color.navy, style = plot.style_linebr)

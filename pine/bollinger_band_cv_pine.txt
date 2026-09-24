@@ -1,0 +1,124 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Amjad_S
+
+//@version=6
+//+------------------------------------------------------------------+
+//                                                         INDICATOR |
+//<<+----------------------------------------------------------------+{
+indicator("CRYPTO TRADING STRATEGY",
+    overlay = true)
+
+//>>+----------------------------------------------------------------+}
+//                                                            INPUTS |
+//<<+----------------------------------------------------------------+{
+int bb_window = input(20, title = 'Bollinger Band Window')
+float bb_mult = input(2.0, title = 'Bollinger Bands Multiplier')
+int z_score_window = input(20, title = 'Z Score Window')
+float high_cv_thresh = input(2.0, title = 'Cumulative Volume Higher Threshold')
+float low_cv_thresh = input(2.0, title = 'Cumulative Volume Lower Threshold')
+
+// sl and tp 
+atr = ta.atr(14)
+float atr_mult = input(3.0, title = 'ATR SL MULTIPLIER')
+float rr = input(1.0, title = 'RISK REWARD')
+
+//>>+----------------------------------------------------------------+}
+//                                                        INDICATORS |
+//<<+----------------------------------------------------------------+{
+// bollinger bands ---------------------------------------------------
+[bb_m, bb_h, bb_l] = ta.bb(close, bb_window, bb_mult)
+
+// z-score -----------------------------------------------------------
+z_score(data) =>
+    (data - ta.sma(data, z_score_window)) / ta.stdev(data, z_score_window, biased = false)
+
+// cumulative volume -------------------------------------------------
+var cum_vol = float(na)
+
+var is_new_session = bool(na)
+session_change = timeframe.change('1D')
+
+if session_change == true
+    cum_vol := 0.0
+
+cum_vol += math.sign(close - open) * volume
+stan_cvol = z_score(cum_vol)
+z_cum_vol = na(stan_cvol) ? 0 : stan_cvol
+
+//>>+----------------------------------------------------------------+}
+//                                                        CONFLUENCE |
+//<<+----------------------------------------------------------------+{
+
+//>>+----------------------------------------------------------------+}
+//                                                           SIGNALS |
+//<<+----------------------------------------------------------------+{
+long_signal = (close > bb_h) and (z_cum_vol > high_cv_thresh)
+long_signal_conf = long_signal
+long_valid = long_signal_conf[1]
+
+short_signal = (close < bb_l) and (z_cum_vol < -1 * low_cv_thresh)
+short_signal_conf = short_signal
+short_valid = short_signal_conf[1]
+
+//>>+----------------------------------------------------------------+}
+//                                                           SL & TP |
+//<<+----------------------------------------------------------------+{
+rd(val) =>
+    math.round(val, 5)
+
+sl_tp(order) =>
+    side = order == 'long' ? 1 : order == 'short' ? -1 : na 
+    sl_dist = atr * atr_mult 
+    sl = rd(open - sl_dist * side)
+    tp = rd(open + sl_dist * side * rr)
+    [sl, tp]
+
+//>>+----------------------------------------------------------------+}
+//                                                  VALIDATE SIGNALS |
+//<<+----------------------------------------------------------------+{
+long_trigger = long_valid and not long_valid[1]
+short_trigger = short_valid and not short_valid[1] 
+
+var FirstTrade = bool(na) 
+
+if session_change
+    FirstTrade := false 
+else
+    if long_trigger or short_trigger
+        FirstTrade := true
+
+FirstTradeValid = FirstTrade and not FirstTrade[1]
+
+//>>+----------------------------------------------------------------+}
+//                                                      SIGNAL PLOTS |
+//<<+----------------------------------------------------------------+{
+if long_trigger
+    [sl, tp] = sl_tp('long')
+
+    label.new(x = bar_index, y = low, 
+        text = 'long' + '\n' + 'sl: @' + str.tostring(sl) + '\n' + 'tp: @' + str.tostring(tp), 
+        color = FirstTradeValid ? color.green : color.gray,
+        style = label.style_label_up)
+
+    if FirstTradeValid
+        alert(message = "LONG " + syminfo.ticker + " " + timeframe.period + " ent: @" + str.tostring(close, format.mintick) + 'sl: @' + str.tostring(sl) + 'tp: @' + str.tostring(tp),
+             freq = alert.freq_once_per_bar)
+
+if short_trigger
+    [sl, tp] = sl_tp('short')
+
+    label.new(x = bar_index, y = high, 
+        text = 'short' + '\n' + 'sl: @' + str.tostring(sl) + '\n' + 'tp: @' + str.tostring(tp), 
+        color = FirstTradeValid ? color.red : color.gray,
+        style = label.style_label_down)
+
+    if FirstTradeValid
+        alert(message = "SHORT " + syminfo.ticker + " " + timeframe.period + " ent: @" + str.tostring(close, format.mintick) + 'sl: @' + str.tostring(sl) + 'tp: @' + str.tostring(tp),
+             freq = alert.freq_once_per_bar)
+         
+//>>+----------------------------------------------------------------+}
+//                                                   INDICATOR PLOTS |
+//<<+----------------------------------------------------------------+{
+plot(bb_m, title = 'Moving Average', color = color.blue)
+plot(bb_h, title = 'Upper Bollinger Band', color = color.green)
+plot(bb_l, title = 'Lower Bollinger Band', color = color.red)
