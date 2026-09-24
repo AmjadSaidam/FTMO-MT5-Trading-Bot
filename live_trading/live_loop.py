@@ -156,7 +156,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
         initial_account_balance = acc_info.balance
     saved_state = _load_state()
 
-    def update_state_dicts(reason: str = 'sl_tp_hit') -> bool:
+    def update_state_dicts(reason: str = 'sl_tp_hit_or_manual_close') -> bool:
         """reconciles tickets against actual MT5 position state; returns True if any symbol's state changed"""
         reconciled = False
         for symbol, tickets in strategy_open_tickets.items():
@@ -245,8 +245,10 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
             # get symbol info
             for symbol, strat in symbols_strats.items():
                 symbol_info = mt5.symbol_info(symbol)
+                # closed terminal64.exe raises warning, re-establish connection
                 if symbol_info is None:
                     logging.warning(f'{symbol}: symbol_info() unavailable, skipping this poll') 
+                    _reconnect_if_disconnected()
                     continue
                 asset_class = symbol_info.path.split('\\')[0]
 
