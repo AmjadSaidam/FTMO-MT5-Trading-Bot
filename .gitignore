@@ -7,3 +7,7 @@ logs/
 
 # claude
 .claude/
+# test / coverage artefacts
+*.xml
+*.yaml
+.pytest_cache/
