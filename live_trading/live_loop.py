@@ -15,18 +15,17 @@ from datetime import datetime, timedelta
 import MetaTrader5 as mt5
 import time
 import logging
-from dotenv import load_dotenv
-load_dotenv()
+from dotenv import load_dotenv; load_dotenv()
 
 # code/*.py modules cross-import each other by bare module name (eg. "from risk_management import atr"),
 # so both the project root and code/ itself must be on sys.path (mirrors app/dashboard.py)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-for p in (ROOT, os.path.join(ROOT, 'code')):
+for p in (ROOT, os.path.join(ROOT, 'code', 'mt5')):
     if p not in sys.path:
         sys.path.insert(0, p)
 # .py
-import mt5_connector as mt5_conn
-import mt5_errors as mt5_err
+import mt5.mt5_connector as mt5_conn
+import mt5.mt5_errors as mt5_err
 import logging_config as log_cfg
 from code.trading_strategies import (session_breakout, vwap_breakout, bollinger_band_cdv,
                                      lower_to_higher_timeframe, concatenate_timeframe_data)
