@@ -1,8 +1,11 @@
 # FTMO MT5 Trading Bot
 
+[![codecov](https://codecov.io/gh/AmjadSaidam/FTMO-MT5-Trading-Bot/graph/badge.svg)](https://codecov.io/gh/AmjadSaidam/FTMO-MT5-Trading-Bot)
+
 The repository contains an end-to-end trading strategy (portfolio) pipeline, from backtesting to deployment code, intended to be used to pass the one-step FTMO prop firm evaluation [1].
 
 ![Repo Header](/images/repo_header.png)
+
 
 DISCLAIMER: THIS REPOSITORY AND ITS CONTENTS DO NOT CONSTITUTE FINANCIAL ADVICE. THE LIVE CODE IS PAPER-TRADING COMPATIBLE, AND PERSONAL PAPER TRADING AND TESTING IS HIGHLY RECOMMENDED BEFORE ANY CAPITAL OUTLAY. AS OF WRITING, I AM CURRENTLY TRADING THIS LIVE ON TWO ACCOUNTS.
 
