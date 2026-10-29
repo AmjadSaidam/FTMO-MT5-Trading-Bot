@@ -1,0 +1,31 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # MetaTrader5 is windows-only and stubbed in tests/conftest.py, so requirements.txt is not installed here
+      - name: Install dependencies
+        run: pip install pandas numpy scikit-learn python-dotenv pytest pytest-cov
+
+      # plain `pytest`, not `python -m pytest`: -m puts the repo root on sys.path where code/ shadows the stdlib `code` module
+      - name: Run tests with coverage
+        run: pytest tests --cov=live_trading --cov=mt5 --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          fail_ci_if_error: true
