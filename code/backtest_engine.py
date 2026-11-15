@@ -1,16 +1,14 @@
 """
 """
 # general imports 
-import os
 import pandas as pd
 import numpy as np 
 from sklearn.ensemble import RandomForestClassifier
 # type casting 
-from functools import partial 
 from typing import Callable
 # .py importsGix 
-from risk_management import atr, consecutive_loss_threshold
-from regime_filter import r2, categorise_regime
+from risk_management import (atr, consecutive_loss_threshold)
+from regime_filter import (r2, categorise_regime)
 
 # --- POSITION LOGIC ---
 def risk_scaling(fraction_risked: float = 0.01, signal_number: int = 1):
@@ -39,7 +37,7 @@ def account_equity(value, asset_return):
     return value * (1 + asset_return)
 
 # --- TRADING STRATEGY PIPELINE ---
-SignalFunc = Callable[..., tuple[pd.Series, np.ndarray]]
+SignalFunc = Callable[..., tuple[pd.Series, np.ndarray]] # signal function type hinter
 
 def backtest_strategy(data: pd.DataFrame,
                       signal_fc: SignalFunc,
@@ -51,36 +49,37 @@ def backtest_strategy(data: pd.DataFrame,
                       risk_reward: float = 2.0,
                       consecutive_loss_before_skip: int | None = None,
                       ensamble_signal_validation: RandomForestClassifier | None = None,
+                      feature_window: int = 30,      # rolling window for regime / rel_volume ml features (must match live META_ML_FEATURE_WINDOW)
+                      warmup_bars: int = 0,          # leading history bars: indicators / signals / features are computed over them, but no signal bar may sit in them and they are trimmed from the output
                       leverage_multiplier: int = 1, 
                       # margin_percentage: float = 0.30, 
                       slippage_dollar: float = 0.0,
                       spread_dollar: float = 0.0,
                       commission_pct: float = 0.00004, 
                       standard_lot: float = 1e5, 
-                      dollar_commission_lot: float = 5.0, 
+                      dollar_commission_lot: float = 2.5, 
                       minimum_volume_lots: float = 0.01, 
                       trading_time_zone: str = 'Europe/London') -> dict:
-    """
-    signal agnostic (signal as input not calculated in logic) atr backtest boilerplate function. 
-
-    commission_pct - float: the default one-way percentage commission for trade entry, is commission type is set to 'variable' this a becomes one-way percentage/volume commission
-    """
+    """signal agnostic (signal as input not calculated in logic) backtest function. """
     # ensure timezone is local clock time 
     if data.index.tz is None:
         data.set_index(data.index.tz_localize('UTC').tz_convert(trading_time_zone), inplace = True) # if naive localize and set to local clock time 
     if str(data.index.tz) != trading_time_zone:
         data.set_index(data.index.tz_convert(trading_time_zone), inplace = True) # if aware convert to local clock time 
 
-    tot_trades: int = 0
-    skipped_trades: int = 0
-    winning_trades: int = 0
 
     # --- sessions check ---
     signal, signal_direction = signal_fc(data, **(signal_kwargs or {})) # if signal_kwargs empty returns False/None default to {}
 
     # --- backtest logic (event based analysis) ---
+    # meta data
+    tot_trades: int = 0
+    skipped_trades: int = 0
+    winning_trades: int = 0
+    
     # vars (ohlc from base timeframe)
     n = len(data)
+    warmup_bars = int(np.clip(warmup_bars, 0, max(n - 1, 0))) # always keep at least one output bar
     close_ = data['close'].to_numpy()
     vol_atr = atr(data)
     signal = signal.to_numpy() # use signal_fc's return value directly rather than re-reading data['signal'], which only exists if signal_fc mutates data as a side effect
@@ -113,7 +112,7 @@ def backtest_strategy(data: pd.DataFrame,
     low = data['low']
     close = data['close']
     volume = data['volume']
-    rolling_window = 30
+    rolling_window = feature_window
     atr_pct = vol_atr / data['close'].to_numpy()
     r_sq = data['close'].rolling(rolling_window).apply(r2, raw = True) # raw transfers input data['close'] to numpy array type
     regime = categorise_regime(r_sq)
@@ -126,7 +125,7 @@ def backtest_strategy(data: pd.DataFrame,
 
     # logic
     for t, df in enumerate(data.itertuples()):
-        if t == 0: # no prior bar to reference (avoids numpy negative-index wraparound on signal[-1]/close_[-1])
+        if t <= warmup_bars: # t == 0: no prior bar to reference (avoids numpy negative-index wraparound on signal[-1]/close_[-1]); t <= warmup_bars: signal bar t-1 is history, not part of this window
             continue
 
         # check skip flag is false so signals are valid for trading
@@ -168,7 +167,14 @@ def backtest_strategy(data: pd.DataFrame,
                 label_trd_w[trade_time] = 1
             elif eod_exit:
                 exit_price = df.open
-                label_trd_w[trade_time] = 1 if trade_direction * (exit_price - entry_price) > 0 else 0
+                eod_win = trade_direction * (exit_price - entry_price) > 0
+                label_trd_w[trade_time] = int(eod_win)
+                # mirror live: eod close counts toward the losing streak; the close happens on the new day, so a breach skips this day
+                consec_loss = 0 if eod_win else consec_loss + 1
+                if consecutive_loss_before_skip is not None and consecutive_loss_threshold(consec_loss, consecutive_loss_before_skip):
+                    consec_loss = 0
+                    traded_today = True
+                    skipped_trades += 1
             
             # logs
             price_for_return = exit_price if (exit_price is not None) else df.close
@@ -197,7 +203,7 @@ def backtest_strategy(data: pd.DataFrame,
                 # ensemble point prediction (used only in out of sample testing)
                 # must be instentiated and trained on data otherwise pass
                 if ensamble_signal_validation is not None:
-                    if t >= 30: # check window large enough
+                    if t >= rolling_window: # check window large enough
                         point_features = pd.DataFrame({
                             'atr_pct': [atr_pct[t - 1]], 
                             'regime': [regime[t - 1]], 
@@ -210,7 +216,7 @@ def backtest_strategy(data: pd.DataFrame,
                             traded_today = True
                         
                         # log prediction (required for model evaluation)
-                        ml_label_predict[t] = int(valid_trade)
+                        ml_label_predict[t - 1] = int(valid_trade) # signal bar, aligned with ml_label / features
 
                 # traded_today must be False, true when new day or no signal generated
                 if not traded_today: 
@@ -233,16 +239,17 @@ def backtest_strategy(data: pd.DataFrame,
                     leverage *= leverage_multiplier # scale leverage for for fixed (None) commission
 
                     # transaction costs
-                    slippage_pct = slippage_dollar / df.close
-                    spread_pct = spread_dollar / df.close
-                    
-                    # fixed fees for crypto/indicies/commodities and fx
+                    slippage_pct = slippage_dollar / df.open # fraction of fill price (entry at open)
+                    spread_pct = spread_dollar / df.open     # full bid-ask spread, crossed once per round trip
+
+                    # costs as fraction of equity: price-based costs scale with leverage (notional / equity)
+                    # slippage and commission paid on entry and exit (*2), spread paid once per round trip
                     trade_volume_lots = trade_value / df.open
                     if forex:
                         trade_volume_lots /= standard_lot
-                        entry_cost = (slippage_pct + spread_pct) + (trade_volume_lots * dollar_commission_lot / equity[t]) * 2  # position size / standard lot * 5 (fraction of dollar commission per lot), already $equity so no leverage scaling 
+                        entry_cost = (2 * slippage_pct + spread_pct) * leverage + (trade_volume_lots * dollar_commission_lot / equity[t]) * 2  # lots * $ commission per lot per side, already a fraction of $equity so no leverage scaling
                     else:
-                        entry_cost = (slippage_pct + spread_pct + commission_pct) * 2 * leverage # *2 for round trip cosst
+                        entry_cost = (2 * (slippage_pct + commission_pct) + spread_pct) * leverage
 
                     # check volume is within tradable limits
                     max_trade_volume_lots = account_balance / df.open
@@ -267,11 +274,11 @@ def backtest_strategy(data: pd.DataFrame,
                             if consecutive_loss_before_skip is not None and consecutive_loss_threshold(consec_loss, consecutive_loss_before_skip):
                                 consec_loss = 0 # after skip reset counter
                                 skip_next_day = True
-                            label_trd_w[t] = 0 # ml label: lossing trade
+                            label_trd_w[t - 1] = 0 # ml label: lossing trade (stored on signal bar t-1, whose features the model sees at prediction)
                         elif entry_hit_target:
                             exit_price = target_price
                             consec_loss = 0
-                            label_trd_w[t] = 1 # ml label: winning trade
+                            label_trd_w[t - 1] = 1 # ml label: winning trade
                         else:
                             exit_price = None
 
@@ -289,7 +296,7 @@ def backtest_strategy(data: pd.DataFrame,
                         entry_day = day[t]
                         in_trade = exit_price is None
 
-                        trade_time = t
+                        trade_time = t - 1 # signal bar index, ml label aligned with the features used at prediction (no lookahead)
                         tot_trades += 1
 
                         # ensure limit of one trade per day
@@ -297,19 +304,20 @@ def backtest_strategy(data: pd.DataFrame,
                     else: 
                         traded_today = True
         
-    # append default var arrays to dataframe
-    data = data.assign(
-        position = position, 
-        volume_lots = volume_lots, 
-        adjusted_returns = adjusted_returns, 
-        equity = equity, 
-        trade_rr = trade_rr,
-        atr_pct = atr_pct,                  # feature 1 
-        regime = regime,                    # feature 2
-        breakout_conv = breakout_conv,      # feature 3 
-        rel_volume = rel_volume,            # feature 4 
-        ml_label = label_trd_w, 
-        ml_label_predict = ml_label_predict
+    # append default var arrays to dataframe, trimming the warm-up history so outputs cover only the trading window
+    w = slice(warmup_bars, None)
+    data = data.iloc[w].assign(
+        position = position[w],
+        volume_lots = volume_lots[w],
+        adjusted_returns = adjusted_returns[w],
+        equity = equity[w],
+        trade_rr = trade_rr[w],
+        atr_pct = atr_pct[w],                  # feature 1
+        regime = regime[w],                    # feature 2
+        breakout_conv = breakout_conv[w],      # feature 3
+        rel_volume = rel_volume[w],            # feature 4
+        ml_label = label_trd_w[w],
+        ml_label_predict = ml_label_predict[w]
     )
 
     return {
