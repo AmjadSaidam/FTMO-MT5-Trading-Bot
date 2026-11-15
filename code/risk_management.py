@@ -37,7 +37,9 @@ class RandomForestVol():
                  x_features: pd.DataFrame, 
                  y_label: pd.Series,
                  categorical_col: str):
-        valid = y_label.notna() & (x_features[categorical_col].notna()) # only completed trades carry a win/loss label, subset (feature, label) by non None values 
+        x_features, y_label = x_features.align(y_label, join = 'inner', axis = 0) # mismatched lengths/indices -> keep only rows present in both
+        x_features = x_features.replace([np.inf, -np.inf], np.nan) # rf (sklearn>=1.4) handles NaN natively but rejects inf
+        valid = y_label.notna() & (x_features[categorical_col].notna()) # only completed trades carry a win/loss label, subset (feature, label) by non None values
         self.feature_names = x_features.columns
         self.x = x_features[valid] # kept as DataFrame - ColumnTransformer needs column names to select on
         self.y = y_label[valid].to_numpy().astype(int)
@@ -68,6 +70,10 @@ class RandomForestVol():
             self.model = model.fit(self.x, self.y)
             return self.model # encoder set within piepline and automatically set 
 
+        n_train = int(np.floor(train_split * min_len))
+        if n_train < 1 or n_train >= min_len: # split would leave an empty train or test set
+            return None
+
         x_train, x_test, y_train, y_test = train_test_split(self.x, 
                                                             self.y, 
                                                             train_size = train_split,
@@ -88,5 +94,11 @@ class RandomForestVol():
         """predict using trained model"""
         if self.model is None: # train_model() no-ops when there's not enough labeled in-sample data to fit
             return False
+        
         point_feature_pred = pd.DataFrame(features, columns = self.feature_names) # to ensure features have identical names to trained feature set
+        point_feature_pred = point_feature_pred.replace([np.inf, -np.inf], np.nan)
+        
+        for col in self.categorical_cols: # NaN category crashes the encoder -> map to unseen value (encoded as -1)
+            point_feature_pred[col] = point_feature_pred[col].astype(object).where(point_feature_pred[col].notna(), '__missing__')
+        
         return self.model.predict(point_feature_pred)
