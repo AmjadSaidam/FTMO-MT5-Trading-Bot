@@ -11,7 +11,7 @@ import sys
 import json
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import (datetime, timedelta)
 import MetaTrader5 as mt5
 import time
 import logging
@@ -29,9 +29,9 @@ import mt5.mt5_errors as mt5_err
 import logging_config as log_cfg
 from code.trading_strategies import (session_breakout, vwap_breakout, bollinger_band_cdv,
                                      lower_to_higher_timeframe, concatenate_timeframe_data)
-from code.backtest_engine import SignalFunc, position_sizing
-from code.regime_filter import r2, categorise_regime
-from code.risk_management import atr, consecutive_loss_threshold, RandomForestVol
+from code.backtest_engine import (SignalFunc, position_sizing)
+from code.regime_filter import (r2, categorise_regime)
+from code.risk_management import (atr, consecutive_loss_threshold, RandomForestVol)
 import code.optimisation as opt
 
 # --- MULTITIMEFRAME ---
@@ -101,6 +101,8 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
 
     # ml risk management
     feature_window = int(os.environ.get('META_ML_FEATURE_WINDOW'))
+    wfa_warmup_days = 4 # history before the IS window used only to warm indicators (matches the 4-day live signal pull)
+    consec_loss_guard = int(os.environ.get('META_ML_CONSEC_LOSS_BEFORE_TRADE_SKIP'))
     strategy_models = {} # save to states on restart
 
     # performance
@@ -119,17 +121,24 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
             # data, drop the still-forming last bar so training only sees closed bars
             # date-range fetch (not a bar count) so the window is exactly wfa_in_sample_length
             # calendar days regardless of the symbol's trading session length (24/7 crypto vs FX vs equity hours)
+            # pull wfa_warmup_days extra history before the IS window (same lookback as the live signal pull) so
+            # rolling / session indicators are already warm on the window's first bar; the engine trades and reports only from is_start
+            is_start = as_of_time - timedelta(days = wfa_in_sample_length)
             wfa_data = mt5_conn.get_bars_range(symbol,
-                                               date_from = as_of_time - timedelta(days = wfa_in_sample_length),
+                                               date_from = is_start - timedelta(days = wfa_warmup_days),
                                                date_to = as_of_time).iloc[:-1]
             wfa_data = add_multi_timeframe_columns(strat, wfa_data)
+            warmup_bars = int(wfa_data.index.searchsorted(pd.Timestamp(is_start)))
             # run grid search
             gd_params = opt.grid_search_params(data = wfa_data,
                                                strat = strat,
                                                strat_kwargs = (symbols_strats_kwargs or {}).get(symbol) or {},
                                                account_balance = strat_equity,
                                                atr_multilpiers = grid_search_atrs,
-                                               risk_rewards = grid_search_rrs)
+                                               risk_rewards = grid_search_rrs,
+                                               consec_loss_guard = consec_loss_guard, # identical risk rules in-sample and live
+                                               feature_window = feature_window,       # identical feature definitions in-sample and live
+                                               warmup_bars = warmup_bars)
             gd_res = opt.run_grid_search(gd_params)
             gd_metadata = opt.grid_search_statistics(gd_res, grid_search_atrs, grid_search_rrs)
 
@@ -137,7 +146,10 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
             gd_opt_frame: pd.DataFrame = gd_metadata['opt_df']
 
             # train ensemble model
-            ml_features_in_sample = gd_opt_frame.loc[:, ['atr_pct', 'regime', 'breakout_conv', 'rel_volume']]
+            feature_cols = ['atr_pct', 'regime', 'breakout_conv', 'rel_volume']
+            if gd_opt_frame is None: # no grid point produced a valid challenge score -> empty frame, model stays untrained (trading skipped)
+                gd_opt_frame = pd.DataFrame(columns = feature_cols + ['ml_label'])
+            ml_features_in_sample = gd_opt_frame.loc[:, feature_cols]
             ensemble = RandomForestVol(ml_features_in_sample, gd_opt_frame['ml_label'], 'regime')
             ensemble.train_model(train_split = 1) # trained model appended to class attribute
             if ensemble.model is None:
@@ -298,7 +310,7 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                     # pull data
                     # pull 4 days of data, to ensure features are not None on last closed bar (account for weekends + hoilday days)
                     current_day_time = pd.to_datetime(current_day_time, unit = 's')
-                    data_from = current_day_time - pd.Timedelta(days = 4)
+                    data_from = current_day_time - pd.Timedelta(days = wfa_warmup_days)
                     data = mt5_conn.get_bars_range(symbol,
                                                    date_from = data_from,
                                                    date_to = current_day_time)
@@ -331,8 +343,9 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                     # guard by validating signal
                     ensemble: RandomForestVol = strategy_models[symbol]
                     valid_trade = ensemble.model_predict(point_features) # returns False - trade skipped 
-                    if consecutive_loss_threshold(strategy_consec_loss[symbol], int(os.environ.get('META_ML_CONSEC_LOSS_BEFORE_TRADE_SKIP'))):
+                    if consecutive_loss_threshold(strategy_consec_loss[symbol], consec_loss_guard):
                         strategy_skip_trade[symbol] = True
+                        strategy_consec_loss[symbol] = 0 # after skip reset counter (mirrors backtest), otherwise the skip never lifts
                         _persist()
 
                     # asset vol
@@ -352,7 +365,10 @@ def run_live_loop(symbols_strats: dict[str, SignalFunc],
                         if signal:
                             # write update to /trades.log
                             log_cfg.log_event('signal_generated', symbol = symbol, strategy = strat.__name__, direction = int(signal_direction), valid_trade = bool(valid_trade))
-                        
+                            if not valid_trade: # model rejected the day's signal -> no further trades today (mirrors backtest)
+                                strategy_traded_today[symbol] = True
+                                _persist()
+
                         # signal evaluated at most recent closed bar
                         if signal and valid_trade:
                             # type
