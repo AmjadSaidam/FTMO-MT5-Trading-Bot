@@ -4,7 +4,7 @@
 import numpy as np 
 import pandas as pd
 from datetime import time 
-from strategy_indicators import vwap, bollinger_bands, sesssion_cumulative_volume_delta, z_score
+from strategy_indicators import (vwap, bollinger_bands, sesssion_cumulative_volume_delta, z_score, session_flags)
 
 # ----------------------------------------
 # --- SESSION BRAKOUT TRADING STRATEGY ---
@@ -33,7 +33,8 @@ def lower_to_higher_timeframe(data: pd.DataFrame,
         data.rename(columns = {k: k + higher_tf for k in ohlc_dict.keys()}, inplace = True)
     return data
 
-def concatenate_timeframe_data(min_res_data: pd.DataFrame, higher_tf_data: list[pd.DataFrame]):
+def concatenate_timeframe_data(min_res_data: pd.DataFrame, 
+                               higher_tf_data: list[pd.DataFrame]):
     """
     """
     alligned_data = []
@@ -200,11 +201,12 @@ def standerdise_join_data(base_data: pd.DataFrame,
     return target_data
 
 def vwap_breakout(data: pd.DataFrame,
-                  session_start: time = time(9, 5, 0),
+                  session_start: time = time(9, 30, 0),           # NYSE open
                   retest_distance: int = 1,
                   volume_window: int = 1,
                   weekend_trading: bool = False,
-                  min_bars_after_open: int = 12) -> tuple[pd.Series, np.ndarray]:
+                  min_bars_after_open: int = 12,
+                  session_tz: str = 'America/New_York') -> tuple[pd.Series, np.ndarray]:
     """
     equity strategy
     n bars have elapsed from new session
@@ -215,7 +217,7 @@ def vwap_breakout(data: pd.DataFrame,
     forming off few observations and prone to noisy breakout/retest signals (default 12 bars @ 5min = first 1h)
     """
     # indicator
-    data['vwap'] = vwap(data, session_start)
+    data['vwap'] = vwap(data, session_start, session_tz)
 
     close = data['close']
     high = data['high']
@@ -244,10 +246,11 @@ def vwap_breakout(data: pd.DataFrame,
     if not weekend_trading:
         weekday = valid_weekday(data)
 
-    # session warm-up: bars elapsed since session_start, same session grouping as vwap()
-    session_id = (data.index.time == session_start).cumsum()
-    bars_since_open = data.groupby(session_id).cumcount()
-    warmed_up = bars_since_open >= min_bars_after_open
+    # session warm-up: bars elapsed since the exchange open, same session grouping as vwap()
+    # pre-market bars (before session_start on the day) are never warmed up
+    session_open, in_session = session_flags(data.index, session_start, session_tz)
+    bars_since_open = data.groupby(session_open.cumsum()).cumcount()
+    warmed_up = pd.Series(in_session & (bars_since_open.to_numpy() >= min_bars_after_open), index = data.index)
 
     val_long_signal = confluence_([long_signal, high_volume, weekday, warmed_up])
     val_short_signal = confluence_([short_signal, high_volume, weekday, warmed_up])
