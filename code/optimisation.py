@@ -11,10 +11,12 @@ def grid_search_params(data: pd.DataFrame,
                        atr_multilpiers: list[float], 
                        risk_rewards: list[float], 
                        fraction_risked: float = 0.01,
-                       consec_loss_guard: int = 2):
-    """
-    """
+                       consec_loss_guard: int = 2,
+                       feature_window: int = 30,
+                       warmup_bars: int = 0) -> list[dict[str]]:
+    """returns list of backtest parameters given parameter iterabels"""
     inputs = []
+    
     for atr_m in atr_multilpiers:
         for rr in risk_rewards:
             inputs.append(
@@ -26,24 +28,24 @@ def grid_search_params(data: pd.DataFrame,
                     'signal_kwargs': strat_kwargs, 
                     'atr_multiplier': atr_m, 
                     'risk_reward': rr, 
-                    'consecutive_loss_before_skip': consec_loss_guard, 
+                    'consecutive_loss_before_skip': consec_loss_guard,
+                    'feature_window': feature_window,
+                    'warmup_bars': warmup_bars,
                 }
             )
     
     return inputs
 
 # map function to input iterbale
-def run_grid_search(training_params: dict[str]):
-    """
-    """
+def run_grid_search(training_params: dict[str]) -> list[dict]:
+    """iterates backtest engine on parameter subset"""
     return list(map(lambda input: backtest.backtest_strategy(**input)['data'], training_params))
 
 # get final returns 
 def grid_search_statistics(grid_search_output: list[pd.DataFrame], 
                            grid_search_x: list[float], 
-                           grid_search_y: list[float]) -> dict[pd.DataFrame]:
-    """
-    """
+                           grid_search_y: list[float]) -> dict[str]:
+    """selects optimal atr-mult and trade rr that maximise prop firm objective function"""
     n, m = len(grid_search_x), len(grid_search_y)
     final_returns = np.zeros((n, m))
 
@@ -54,7 +56,7 @@ def grid_search_statistics(grid_search_output: list[pd.DataFrame],
     
     for i in range(n):
         for j in range(m):
-            df = grid_search_output[i*m + j]
+            df = grid_search_output[i * m + j]
             # instentiate challenge function 
             chall_val = cv.PropFirmValidation(df['adjusted_returns'], df['equity'])
             chall_val.strategy_challenge_summary()
