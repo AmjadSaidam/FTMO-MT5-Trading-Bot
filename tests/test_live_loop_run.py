@@ -279,15 +279,23 @@ class TestRestartAndEndOfDay:
         conn.close_position.assert_not_called()
 
     def test_losing_close_increments_consecutive_losses_and_a_win_resets_them(self, monkeypatch, kw, conn, state):
-        monkeypatch.setattr(live_loop, '_load_state', lambda: {**self.OPEN, 'strategy_consec_loss': {'GBPUSD': 2}})
+        monkeypatch.setattr(live_loop, '_load_state', lambda: {**self.OPEN, 'strategy_consec_loss': {'GBPUSD': 1}})
         conn.get_positions.return_value = ()
         conn.get_deal_profit.return_value = -50.0
         _run(monkeypatch, kw)
-        assert _last_state(state)['strategy_consec_loss'] == {'GBPUSD': 3}
+        assert _last_state(state)['strategy_consec_loss'] == {'GBPUSD': 2}
 
         conn.get_deal_profit.return_value = 50.0
         _run(monkeypatch, kw)
         assert _last_state(state)['strategy_consec_loss'] == {'GBPUSD': 0}
+
+    def test_loss_streak_breach_skips_trading_and_resets_counter(self, monkeypatch, kw, conn, state):
+        monkeypatch.setattr(live_loop, '_load_state', lambda: {'strategy_consec_loss': {'GBPUSD': 3}})  # META_ML_CONSEC_LOSS_BEFORE_TRADE_SKIP = 3
+        _run(monkeypatch, kw)
+        saved = _last_state(state)
+        assert saved['strategy_skip_trade'] == {'GBPUSD': True}
+        assert saved['strategy_consec_loss'] == {'GBPUSD': 0}  # reset, so the skip lifts on the next day
+        conn.send_order.assert_not_called()
 
     def test_open_position_is_force_closed_on_new_day(self, monkeypatch, kw, conn, state):
         monkeypatch.setattr(live_loop, '_load_state', lambda: self.OPEN)
