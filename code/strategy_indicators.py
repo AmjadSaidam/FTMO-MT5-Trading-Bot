@@ -2,17 +2,36 @@ from datetime import time
 import numpy as np
 import pandas as pd
 
-def vwap(data: pd.DataFrame, 
-         session_start: time = time(9, 0, 0)): # time(H, m, s)
+def session_flags(index: pd.DatetimeIndex,
+                  session_start: time,
+                  session_tz: str | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """
+    returns (session_open, in_session) boolean arrays
+    - session_open: first bar at/after session_start on each calendar day (robust to missing bars, eg. no bar stamped exactly at the open)
+    - in_session: bar time >= session_start on its day (False for pre-market bars)
+    session_tz evaluates the clock in the exchange timezone (DST-safe, eg. 'America/New_York'); naive index treated as UTC
+    """
+    if session_tz is not None:
+        index = (index.tz_localize('UTC') if index.tz is None else index).tz_convert(session_tz)
+    
+    in_session = pd.Series(index.time >= session_start)
+    prior_in_session = in_session.groupby(index.date).shift(1, fill_value = False).astype(bool)
+    session_open = in_session & ~prior_in_session
+    
+    return session_open.to_numpy(), in_session.to_numpy()
+
+def vwap(data: pd.DataFrame,
+         session_start: time = time(9, 0, 0), # time(H, m, s)
+         session_tz: str | None = None):
     """
     calculates volume weighted average price
 
-    default exchange open is 9.00am Europe/London timezone
+    default exchange open is 9.00am in the data's timezone (Europe/London in the backtest) unless session_tz is given
     """
     volume = data['volume']
 
-    session_start_mask = data.index.time == session_start
-    session_id = session_start_mask.cumsum()
+    session_start_mask = session_flags(data.index, session_start, session_tz)[0]
+    session_id = session_start_mask.cumsum() # group per day
 
     ohlc4 = data.loc[:, ['open', 'high', 'low', 'close']].mean(axis = 1)
     price_qty = ohlc4 * volume
