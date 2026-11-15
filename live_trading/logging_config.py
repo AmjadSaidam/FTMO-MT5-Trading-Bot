@@ -31,10 +31,10 @@ class JsonlHandler(logging.Handler):
 
 def setup_logging(level = logging.INFO):
     """configure the root logger (rotating file + console) and the trades logger"""
-    LOG_DIR.mkdir(exist_ok = True)
+    LOG_DIR.mkdir(exist_ok = True) # if exists pass
 
     # debug logging
-    root = logging.getLogger() 
+    root = logging.getLogger() # root logger with name None type
     root.setLevel(level) # by defaults prints at most info logs to consol
     formatter = logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s') # log event formating
 
@@ -43,7 +43,6 @@ def setup_logging(level = logging.INFO):
     )
     file_handler.setFormatter(formatter)
     root.addHandler(file_handler) # root logging at /logs/live_trading.log
-
     console_handler = logging.StreamHandler() # print to console
     console_handler.setFormatter(formatter)
     root.addHandler(console_handler)
@@ -57,5 +56,8 @@ def setup_logging(level = logging.INFO):
 
 def log_event(event_type: str, **fields):
     """emit one structured record to logs/trades.jsonl"""
-    payload = {'timestamp': datetime.now(timezone.utc).isoformat(), 'event': event_type, **fields}
+    payload = {
+        'timestamp': datetime.now(timezone.utc).isoformat(), 
+        'event': event_type, **fields
+    }
     logging.getLogger('trades').info(event_type, extra = {'event': payload})
