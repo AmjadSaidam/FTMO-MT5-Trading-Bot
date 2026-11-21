@@ -170,9 +170,7 @@ class TestDealProfit:
             conn.get_deal_profit(5)
 
 
-# --- known issue ---
-@pytest.mark.xfail(strict = True, reason = 'live_loop imports mt5.mt5_errors while mt5_connector raises mt5_errors (a different '
-                                           'module object), so live_loop `except mt5_err.MT5...` clauses never match')
+# --- regression: live_loop must catch the exception classes mt5_connector actually raises (one mt5_errors module) ---
 def test_live_loop_and_connector_share_the_same_error_classes():
     import live_loop
     assert live_loop.mt5_err.MT5RatesError is conn.mt5_errors.MT5RatesError
