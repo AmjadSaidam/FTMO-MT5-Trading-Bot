@@ -85,6 +85,19 @@ def add_session_flags(data: pd.DataFrame,
 
     return data
 
+def session_breakout_data(data: pd.DataFrame,
+                          base_tf: str = '5min',
+                          higher_tfs: tuple[str, ...] = ('1h', '4h', '8h')) -> pd.DataFrame:
+    """
+    builds the multi-timeframe data session_breakout() expects: base_tf bars with each higher
+    timeframe's ohlcv alligned (backward, no lookahead) as suffixed columns (open1h, open4h, open8h ...)
+    plus LDN / NY session flag columns, index converted to the trading time zone
+    """
+    higher_tf_data = [lower_to_higher_timeframe(data, base_tf, tf) for tf in higher_tfs]
+    multi_timeframe_data = concatenate_timeframe_data(data, higher_tf_data).dropna()
+
+    return add_session_flags(multi_timeframe_data)
+
 def valid_weekday(data: pd.DataFrame) -> pd.Series:
     """
     validates if timestamp is weekend or not
