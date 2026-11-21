@@ -8,7 +8,7 @@ from sklearn.ensemble import RandomForestClassifier
 from typing import Callable
 # .py importsGix 
 from risk_management import (atr, consecutive_loss_threshold)
-from regime_filter import (r2, categorise_regime)
+from regime_filter import (rolling_r2, categorise_regime)
 
 # --- POSITION LOGIC ---
 def risk_scaling(fraction_risked: float = 0.01, signal_number: int = 1):
@@ -43,6 +43,7 @@ def backtest_strategy(data: pd.DataFrame,
                       signal_fc: SignalFunc,
                       signal_kwargs: dict | None = {},
                       forex: bool = False,          # logs lots (forex related fields)
+                      commodity: bool = False,      # commodity lots (eg. XAUUSD: 1 lot = 100 units), % commission like non-forex assets
                       account_balance: float = 1e4,
                       risk_per_trade: float = 0.01,
                       atr_multiplier: int = 2.0,
@@ -56,11 +57,26 @@ def backtest_strategy(data: pd.DataFrame,
                       slippage_dollar: float = 0.0,
                       spread_dollar: float = 0.0,
                       commission_pct: float = 0.00004, 
-                      standard_lot: float = 1e5, 
-                      dollar_commission_lot: float = 2.5, 
-                      minimum_volume_lots: float = 0.01, 
+                      standard_lot: float = 1e5,
+                      commodity_lot: float = 100.0,
+                      dollar_commission_lot: float = 2.5,
+                      minimum_volume_lots: float = 0.01,
+                      forex_max_leverage: float = 100.0,
+                      commodity_max_leverage: float = 50.0,
+                      default_max_leverage: float = 3.33,
                       trading_time_zone: str = 'Europe/London') -> dict:
     """signal agnostic (signal as input not calculated in logic) backtest function. """
+    if forex and commodity:
+        raise ValueError('an asset can be forex or commodity, not both')
+
+    # lot size (units per lot) and max leverage per asset class, non-forex / non-commodity assets trade in units (1 lot = 1 unit)
+    if forex:
+        lot_size, max_leverage = standard_lot, forex_max_leverage
+    elif commodity:
+        lot_size, max_leverage = commodity_lot, commodity_max_leverage
+    else:
+        lot_size, max_leverage = 1.0, default_max_leverage
+
     # ensure timezone is local clock time 
     if data.index.tz is None:
         data.set_index(data.index.tz_localize('UTC').tz_convert(trading_time_zone), inplace = True) # if naive localize and set to local clock time 
@@ -114,7 +130,7 @@ def backtest_strategy(data: pd.DataFrame,
     volume = data['volume']
     rolling_window = feature_window
     atr_pct = vol_atr / data['close'].to_numpy()
-    r_sq = data['close'].rolling(rolling_window).apply(r2, raw = True) # raw transfers input data['close'] to numpy array type
+    r_sq = rolling_r2(data['close'], rolling_window) # vectorised close.rolling(rolling_window).apply(r2, raw = True), same values as live
     regime = categorise_regime(r_sq)
     breakout_conv = ((close - open) / (high - low)).to_numpy()
     rel_volume = volume.rolling(rolling_window).mean().to_numpy()
@@ -202,7 +218,8 @@ def backtest_strategy(data: pd.DataFrame,
 
                 # ensemble point prediction (used only in out of sample testing)
                 # must be instentiated and trained on data otherwise pass
-                if ensamble_signal_validation is not None:
+                # only the day's tradable signal is scored (a prediction after the day's trade / rejection can't change the outcome)
+                if ensamble_signal_validation is not None and not traded_today:
                     if t >= rolling_window: # check window large enough
                         point_features = pd.DataFrame({
                             'atr_pct': [atr_pct[t - 1]], 
@@ -244,18 +261,15 @@ def backtest_strategy(data: pd.DataFrame,
 
                     # costs as fraction of equity: price-based costs scale with leverage (notional / equity)
                     # slippage and commission paid on entry and exit (*2), spread paid once per round trip
-                    trade_volume_lots = trade_value / df.open
+                    trade_volume_lots = trade_value / df.open / lot_size # units -> lots
                     if forex:
-                        trade_volume_lots /= standard_lot
                         entry_cost = (2 * slippage_pct + spread_pct) * leverage + (trade_volume_lots * dollar_commission_lot / equity[t]) * 2  # lots * $ commission per lot per side, already a fraction of $equity so no leverage scaling
                     else:
                         entry_cost = (2 * (slippage_pct + commission_pct) + spread_pct) * leverage
 
                     # check volume is within tradable limits
-                    max_trade_volume_lots = account_balance / df.open
-                    if forex:
-                        max_trade_volume_lots /= standard_lot # match trade_volume_lots' lot-denominated units
-                    valid_trade_volume_lots = minimum_volume_lots <= trade_volume_lots <= max_trade_volume_lots * (100 if forex else 3.33) # enforce max leverage constraint
+                    max_trade_volume_lots = account_balance / df.open / lot_size # 1x leverage, in trade_volume_lots' lot-denominated units
+                    valid_trade_volume_lots = minimum_volume_lots <= trade_volume_lots <= max_trade_volume_lots * max_leverage # enforce max leverage constraint
 
                     if valid_trade_volume_lots:
                         # --- immediately resolved trades --- 
