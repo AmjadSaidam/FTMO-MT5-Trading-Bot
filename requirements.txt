@@ -1,8 +1,9 @@
 # Runtime dependencies for live_trading/live_loop.py only.
 # Install on the Windows VM with: pip install -r requirements.txt
 #
-# MetaTrader5 requires Windows and Python < 3.12 (no macOS/Linux wheels) -
-# see live_trading/mt5_connector.py. Use a 3.11 interpreter on the VM.
+# MetaTrader5 requires Windows (no macOS/Linux wheels) - see
+# live_trading/mt5_connector.py. numpy==2.5.1 requires Python >=3.12, so use
+# a 3.12 interpreter on the VM (MetaTrader5 >=5.0.6180 ships a cp312 wheel).
 
 pandas==3.0.3
 numpy==2.5.1
