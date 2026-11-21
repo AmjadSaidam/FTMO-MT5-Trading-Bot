@@ -1,13 +1,14 @@
 # general
 __pycache__/
-__init__/
-.DS_Store/
+.DS_Store
 .env
 logs/
 
 # claude
 .claude/
+
 # test / coverage artefacts
+.coverage
 *.xml
 *.yaml
 .pytest_cache/
